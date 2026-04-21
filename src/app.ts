@@ -1,24 +1,32 @@
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
+import { env } from './config/env';
+import apiRoutes from './routes/index';
+import { errorHandler } from './middleware/errorHandler';
+import { apiLimiter } from './middleware/rateLimiter';
 
 const app = express();
 
 app.use(helmet());
-app.use(cors({ origin: process.env.FRONTEND_URL }));
+app.use(cors({
+  origin: env.FRONTEND_URL,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+}));
 app.use(morgan('dev'));
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
+app.use(apiLimiter);
 
-// Health check
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+app.use('/api/v1', apiRoutes);
+
+// 404 handler
+app.use((_req, res) => {
+  res.status(404).json({ error: 'Route introuvable' });
 });
 
-// Routes (à brancher au fur et à mesure)
-// app.use('/api/auth', authRouter);
-// app.use('/api/sessions', sessionsRouter);
-// app.use('/api/slots', slotsRouter);
-// app.use('/api/teachers', teachersRouter);
+app.use(errorHandler);
 
 export default app;
