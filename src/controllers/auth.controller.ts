@@ -5,7 +5,9 @@ import { query } from '../config/database';
 import { env } from '../config/env';
 import type { AuthRequest } from '../types';
 import { createError } from '../middleware/errorHandler';
+import jwt from 'jsonwebtoken';
 import { createAccessToken, createRefreshToken, revokeRefreshToken, rotateRefreshToken } from '../services/token.service';
+import { sendPasswordReset } from '../services/email.service';
 
 const registerSchema = z.object({
   schoolName: z.string().min(2),
@@ -129,6 +131,53 @@ export async function registerTeacher(req: Request, res: Response, next: NextFun
       path: '/api/v1/auth',
     });
     res.status(201).json({ token: accessToken, user: { id: userId, email: data.email, fullName: data.fullName, role: 'teacher', schoolId: null } });
+  } catch (err) {
+    next(err);
+  }
+}
+
+const forgotPasswordSchema = z.object({ email: z.string().email() });
+const resetPasswordSchema = z.object({
+  token: z.string().min(1),
+  password: z.string().min(8),
+});
+
+export async function forgotPassword(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { email } = forgotPasswordSchema.parse(req.body);
+    const result = await query<{ id: string }>('SELECT id FROM users WHERE email = $1 AND is_active = true', [email]);
+    // Always respond 200 to avoid email enumeration
+    if (result.rows.length > 0) {
+      const userId = result.rows[0]!.id;
+      const token = jwt.sign({ userId, type: 'password-reset' }, env.JWT_SECRET, { expiresIn: '1h' } as jwt.SignOptions);
+      const resetLink = `${env.FRONTEND_URL}/reset-password?token=${token}`;
+      await sendPasswordReset(email, resetLink);
+    }
+    res.json({ message: 'Si cet email existe, un lien de réinitialisation a été envoyé.' });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function resetPassword(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { token, password } = resetPasswordSchema.parse(req.body);
+    let payload: jwt.JwtPayload;
+    try {
+      payload = jwt.verify(token, env.JWT_SECRET) as jwt.JwtPayload;
+    } catch {
+      throw createError('Lien invalide ou expiré', 400);
+    }
+    if (payload['type'] !== 'password-reset' || !payload['userId']) {
+      throw createError('Lien invalide ou expiré', 400);
+    }
+    const passwordHash = await bcrypt.hash(password, 12);
+    const updated = await query<{ id: string }>(
+      'UPDATE users SET password_hash = $1 WHERE id = $2 AND is_active = true RETURNING id',
+      [passwordHash, payload['userId']]
+    );
+    if (updated.rows.length === 0) throw createError('Utilisateur introuvable', 404);
+    res.json({ message: 'Mot de passe mis à jour avec succès.' });
   } catch (err) {
     next(err);
   }

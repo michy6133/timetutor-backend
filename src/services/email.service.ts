@@ -96,6 +96,29 @@ export async function sendSchedulePublished(teacher: Teacher, session: SessionIn
   });
 }
 
+export async function sendPasswordReset(email: string, resetLink: string): Promise<void> {
+  await send({
+    from: env.SMTP_FROM,
+    to: email,
+    subject: '[TimeTutor] Réinitialisation de votre mot de passe',
+    html: `
+      <div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:32px">
+        <h1 style="color:#880d1e;font-size:22px">Réinitialisation du mot de passe</h1>
+        <p style="color:#6b7280;line-height:1.7">
+          Vous avez demandé à réinitialiser votre mot de passe TimeTutor.<br>
+          Cliquez sur le bouton ci-dessous pour choisir un nouveau mot de passe.
+        </p>
+        <a href="${resetLink}" style="display:inline-block;background:#dd2d4a;color:white;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:600;margin:24px 0">
+          Réinitialiser mon mot de passe →
+        </a>
+        <p style="color:#9ca3af;font-size:12px">Ce lien expire dans 1 heure. Si vous n'êtes pas à l'origine de cette demande, ignorez cet email.</p>
+        <hr style="border:none;border-top:1px solid #e5e7eb;margin:24px 0">
+        <p style="color:#9ca3af;font-size:12px">TimeTutor — Gestion intelligente des emplois du temps</p>
+      </div>
+    `,
+  });
+}
+
 export async function sendContactRequest(
   requesterName: string,
   targetTeacher: Teacher,
