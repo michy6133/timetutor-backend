@@ -2,8 +2,8 @@ import { Router } from 'express';
 import multer from 'multer';
 import {
   listTeachers, addTeacher, importTeachers,
-  removeTeacher, inviteTeacher, remindTeacher,
-  verifyMagicToken, mySessionsForTeacher,
+  removeTeacher, inviteTeacher, remindTeacher, updateTeacher, inviteAllTeachers,
+  verifyMagicToken, mySessionsForTeacher, searchSchoolTeachers,
 } from '../controllers/teachers.controller';
 import { authenticateJWT, requireRole, authenticateMagicToken } from '../middleware/auth';
 
@@ -16,11 +16,16 @@ router.get('/verify/:token', authenticateMagicToken, verifyMagicToken);
 // Teacher portal (JWT auth, role teacher)
 router.get('/my-sessions', authenticateJWT, requireRole('teacher'), mySessionsForTeacher);
 
+// School-wide teacher search (director dashboard)
+router.get('/search', authenticateJWT, requireRole('director'), searchSchoolTeachers);
+
 // Director-only session teacher management
 router.use(authenticateJWT);
 router.get('/', listTeachers);
 router.post('/', requireRole('director'), addTeacher);
 router.post('/import', requireRole('director'), upload.single('file'), importTeachers);
+router.post('/invite-all', requireRole('director'), inviteAllTeachers);
+router.put('/:id', requireRole('director'), updateTeacher);
 router.delete('/:id', requireRole('director'), removeTeacher);
 router.post('/:id/invite', requireRole('director'), inviteTeacher);
 router.post('/:id/remind', requireRole('director'), remindTeacher);

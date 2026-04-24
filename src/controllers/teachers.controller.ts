@@ -16,6 +16,12 @@ const teacherSchema = z.object({
   subjectIds: z.array(z.string().uuid()).default([]),
 });
 
+const teacherUpdateSchema = z.object({
+  fullName: z.string().min(2).optional(),
+  email: z.string().email().optional(),
+  phone: z.string().optional(),
+});
+
 export async function listTeachers(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const { sessionId } = req.params;
@@ -24,6 +30,31 @@ export async function listTeachers(req: AuthRequest, res: Response, next: NextFu
         (SELECT COUNT(*) FROM slot_selections WHERE teacher_id = t.id AND session_id = t.session_id) AS slots_selected
        FROM teachers t WHERE t.session_id = $1 ORDER BY t.full_name`,
       [sessionId]
+    );
+    res.json(rows);
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function searchSchoolTeachers(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const schoolId = req.user!.schoolId;
+    if (!schoolId) { res.json([]); return; }
+    const q = (req.query['q'] as string | undefined)?.trim() ?? '';
+    const like = `%${q}%`;
+    const { rows } = await query(
+      `SELECT DISTINCT ON (LOWER(t.email))
+          t.id, t.full_name, t.email, t.phone, t.status, t.invitation_sent_at, t.session_id,
+          s.name AS session_name, s.academic_year, s.status AS session_status,
+          (SELECT COUNT(*) FROM slot_selections WHERE teacher_id = t.id AND session_id = t.session_id) AS slots_selected
+       FROM teachers t
+       JOIN sessions s ON s.id = t.session_id
+       WHERE s.school_id = $1
+         AND ($2 = '' OR t.full_name ILIKE $3 OR t.email ILIKE $3 OR COALESCE(t.phone,'') ILIKE $3)
+       ORDER BY LOWER(t.email), t.invitation_sent_at DESC NULLS LAST
+       LIMIT 50`,
+      [schoolId, q, like]
     );
     res.json(rows);
   } catch (err) {
@@ -86,6 +117,26 @@ export async function removeTeacher(req: AuthRequest, res: Response, next: NextF
       [id, sessionId, req.user!.schoolId]
     );
     res.json({ message: 'Enseignant supprimé' });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function updateTeacher(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { id, sessionId } = req.params;
+    const data = teacherUpdateSchema.parse(req.body);
+    await query(
+      `UPDATE teachers
+       SET full_name = COALESCE($1, full_name),
+           email = COALESCE($2, email),
+           phone = COALESCE($3, phone),
+           updated_at = NOW()
+       WHERE id=$4 AND session_id=$5
+       AND EXISTS (SELECT 1 FROM sessions s WHERE s.id=$5 AND s.school_id=$6)`,
+      [data.fullName, data.email, data.phone, id, sessionId, req.user!.schoolId]
+    );
+    res.json({ message: 'Enseignant mis à jour' });
   } catch (err) {
     next(err);
   }
@@ -181,6 +232,56 @@ export async function remindTeacher(req: AuthRequest, res: Response, next: NextF
       await sendWhatsAppNotification(teacher.phone, `TimeTutor: rappel pour compléter vos choix de créneaux (${session.name}).`);
     }
     res.json({ message: 'Relance envoyée' });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function inviteAllTeachers(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { sessionId } = req.params;
+    const teachersRes = await query<{ id: string; full_name: string; email: string; phone: string | null }>(
+      `SELECT t.id
+            , t.full_name
+            , t.email
+            , t.phone
+       FROM teachers t
+       JOIN sessions s ON s.id = t.session_id
+       WHERE t.session_id = $1
+         AND s.school_id = $2
+         AND t.invitation_sent_at IS NULL`,
+      [sessionId, req.user!.schoolId]
+    );
+
+    const sRes = await query<{ name: string; academic_year: string; deadline: Date | null }>(
+      `SELECT name, academic_year, deadline FROM sessions WHERE id=$1 AND school_id=$2`,
+      [sessionId, req.user!.schoolId]
+    );
+    const session = sRes.rows[0];
+    if (!session) throw createError('Session introuvable', 404);
+
+    let invited = 0;
+    let failed = 0;
+    for (const teacher of teachersRes.rows) {
+      try {
+        const token = await generateMagicToken(teacher.id, sessionId);
+        const magicLink = `${env.MAGIC_LINK_BASE_URL}/${token}`;
+        await sendInvitation(
+          { fullName: teacher.full_name, email: teacher.email },
+          magicLink,
+          { name: session.name, academicYear: session.academic_year, deadline: session.deadline }
+        );
+        await query(`UPDATE teachers SET invitation_sent_at=NOW() WHERE id=$1`, [teacher.id]);
+        if (teacher.phone) {
+          await sendWhatsAppNotification(teacher.phone, `TimeTutor: invitation envoyee pour la session ${session.name}.`);
+        }
+        invited++;
+      } catch {
+        failed++;
+      }
+    }
+
+    res.json({ invited, failed, total: teachersRes.rows.length });
   } catch (err) {
     next(err);
   }
