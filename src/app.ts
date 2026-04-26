@@ -16,7 +16,15 @@ const app = express();
 
 app.use(helmet());
 app.use(cors({
-  origin: env.FRONTEND_URL,
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true);
+    const allowed = [env.FRONTEND_URL];
+    // Allow any localhost port in development
+    if (env.NODE_ENV === 'development' && /^https?:\/\/localhost(:\d+)?$/.test(origin)) {
+      return cb(null, true);
+    }
+    cb(allowed.includes(origin) ? null : new Error('CORS'), allowed.includes(origin));
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
 }));

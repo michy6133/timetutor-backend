@@ -151,12 +151,85 @@ export async function createSlot(req: AuthRequest, res: Response, next: NextFunc
   try {
     const { sessionId } = req.params;
     const data = slotSchema.parse(req.body);
+
+    // Check for overlapping slots on the same day
+    const overlapCheck = await query<{ exists: boolean }>(
+      `SELECT 1 FROM time_slots
+       WHERE session_id=$1 AND day_of_week=$2 AND status != 'deleted'
+       AND NOT (end_time <= $3::time OR start_time >= $4::time)
+       LIMIT 1`,
+      [sessionId, data.dayOfWeek, data.startTime, data.endTime]
+    );
+    if (overlapCheck.rows.length > 0) {
+      res.status(409).json({ error: 'Chevauchement de créneaux détecté' });
+      return;
+    }
+
     const { rows } = await query<{ id: string }>(
       `INSERT INTO time_slots (session_id, subject_id, day_of_week, start_time, end_time, room)
        VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
       [sessionId, data.subjectId ?? null, data.dayOfWeek, data.startTime, data.endTime, data.room ?? null]
     );
     res.status(201).json({ id: rows[0]?.id, ...data });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function deleteSlot(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { sessionId, slotId } = req.params;
+    const slotRes = await query<{ status: string }>(
+      `SELECT status FROM time_slots WHERE id=$1 AND session_id=$2`,
+      [slotId, sessionId]
+    );
+    const slot = slotRes.rows[0];
+    if (!slot) { res.status(404).json({ error: 'Créneau introuvable' }); return; }
+    if (slot.status !== 'free') {
+      res.status(409).json({ error: 'Seuls les créneaux libres peuvent être supprimés' });
+      return;
+    }
+    await query(`DELETE FROM time_slots WHERE id=$1`, [slotId]);
+    res.json({ message: 'Créneau supprimé' });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function duplicateSlotToDays(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { sessionId, slotId } = req.params;
+    const { days } = z.object({
+      days: z.array(z.enum(['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi'])).min(1),
+    }).parse(req.body);
+
+    const srcRes = await query<{ subject_id: string | null; start_time: string; end_time: string; room: string | null }>(
+      `SELECT subject_id, start_time::text, end_time::text, room FROM time_slots WHERE id=$1 AND session_id=$2`,
+      [slotId, sessionId]
+    );
+    const src = srcRes.rows[0];
+    if (!src) { res.status(404).json({ error: 'Créneau source introuvable' }); return; }
+
+    const created: string[] = [];
+    for (const day of days) {
+      // Check overlap for this day
+      const overlap = await query<{ id: string }>(
+        `SELECT id FROM time_slots
+         WHERE session_id=$1 AND day_of_week=$2 AND status != 'deleted'
+         AND NOT (end_time <= $3::time OR start_time >= $4::time)
+         LIMIT 1`,
+        [sessionId, day, src.start_time.substring(0, 5), src.end_time.substring(0, 5)]
+      );
+      if (overlap.rows.length > 0) continue; // skip overlapping days silently
+
+      const ins = await query<{ id: string }>(
+        `INSERT INTO time_slots (session_id, subject_id, day_of_week, start_time, end_time, room)
+         VALUES ($1,$2,$3,$4::time,$5::time,$6) RETURNING id`,
+        [sessionId, src.subject_id, day, src.start_time.substring(0, 5), src.end_time.substring(0, 5), src.room]
+      );
+      if (ins.rows[0]) created.push(ins.rows[0].id);
+    }
+    res.status(201).json({ created: created.length, ids: created });
   } catch (err) {
     next(err);
   }

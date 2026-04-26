@@ -2,14 +2,21 @@ import type { Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
 import type { AuthRequest } from '../types';
-import { initFedaPayTransaction, verifyFedaPayTransaction } from '../services/fedapay.service';
 import { env } from '../config/env';
 import { sendEmail } from '../services/email.service';
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { FedaPay, Transaction } = require('fedapay');
 
 const PLAN_PRICES: Record<string, number> = {
   ecole:         9900,
   etablissement: 19900,
 };
+
+function setupFedaPay(): void {
+  FedaPay.setApiKey(env.FEDAPAY_SECRET_KEY || '');
+  FedaPay.setEnvironment(env.FEDAPAY_ENV === 'live' ? 'live' : 'sandbox');
+}
 
 export async function listMyTransactions(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -48,24 +55,48 @@ export async function initiateCheckout(req: AuthRequest, res: Response, next: Ne
     );
     const user = userRes.rows[0];
 
-    const callbackUrl = `${env.FRONTEND_URL}/director/billing`;
+    // Mock mode when no API key
+    if (!env.FEDAPAY_SECRET_KEY) {
+      const mockId = `mock_${Date.now()}`;
+      await query(
+        `INSERT INTO payment_transactions (school_id, transaction_id, plan_code, amount, is_annual, status)
+         VALUES ($1,$2,$3,$4,$5,'pending')
+         ON CONFLICT (transaction_id) DO NOTHING`,
+        [req.user.schoolId, mockId, planCode, amount, isAnnual]
+      );
+      res.json({ url: `${env.FRONTEND_URL}/director/billing?tx=${mockId}`, id: mockId });
+      return;
+    }
 
-    const transaction = await initFedaPayTransaction({
-      amount,
+    setupFedaPay();
+
+    const transaction = await Transaction.create({
       description,
-      customerEmail: user?.email ?? '',
-      customerName: user?.full_name ?? '',
-      callbackUrl,
+      amount,
+      callback_url: `${env.FRONTEND_URL}/director/billing`,
+      currency: { iso: 'XOF' },
+      custom_metadata: {
+        schoolId: req.user.schoolId,
+        planCode,
+        isAnnual,
+        userId: req.user.userId,
+      },
+      customer: {
+        email: user?.email ?? '',
+        firstname: user?.full_name ?? '',
+      },
     });
+
+    const token = await transaction.generateToken();
 
     await query(
       `INSERT INTO payment_transactions (school_id, transaction_id, plan_code, amount, is_annual, status)
        VALUES ($1,$2,$3,$4,$5,'pending')
        ON CONFLICT (transaction_id) DO NOTHING`,
-      [req.user.schoolId, transaction.transactionId, planCode, amount, isAnnual]
+      [req.user.schoolId, String(transaction.id), planCode, amount, isAnnual]
     );
 
-    res.json(transaction);
+    res.json({ url: token.url, id: transaction.id });
   } catch (err) {
     next(err);
   }
@@ -81,10 +112,16 @@ export async function confirmCheckout(req: AuthRequest, res: Response, next: Nex
       isAnnual: z.boolean().optional().default(false),
     }).parse(req.body);
 
-    const verification = await verifyFedaPayTransaction(transactionId);
+    let status = 'approved';
 
-    if (!['approved', 'transferred'].includes(verification.status) && !transactionId.startsWith('mock_')) {
-      res.status(400).json({ error: `Paiement non validé (statut: ${verification.status})` });
+    if (!transactionId.startsWith('mock_') && env.FEDAPAY_SECRET_KEY) {
+      setupFedaPay();
+      const tx = await Transaction.retrieve(transactionId);
+      status = tx.status ?? 'unknown';
+    }
+
+    if (!['approved', 'transferred'].includes(status) && !transactionId.startsWith('mock_')) {
+      res.status(400).json({ error: `Paiement non validé (statut: ${status})` });
       return;
     }
 
@@ -133,21 +170,43 @@ export async function confirmCheckout(req: AuthRequest, res: Response, next: Nex
 
 export async function fedaPayWebhook(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { entity, event } = req.body as { entity: string; event: string; data: any };
-    if (entity === 'transaction' && event === 'transaction.approved') {
-      const txId = String(req.body.data?.id);
-      const txRow = await query<{ school_id: string; plan_code: string; is_annual: boolean }>(
-        `SELECT school_id, plan_code, is_annual FROM payment_transactions WHERE transaction_id=$1`, [txId]
-      );
-      if (txRow.rows[0]) {
-        const { school_id, plan_code, is_annual } = txRow.rows[0];
-        const days = is_annual ? 365 : 30;
+    const payload = req.body as {
+      name?: string;
+      entity?: { status?: string; id?: number; custom_metadata?: Record<string, unknown> };
+    };
+
+    if (payload.name === 'transaction.approved' && payload.entity?.status === 'approved') {
+      const meta = payload.entity.custom_metadata;
+      const txId = String(payload.entity.id);
+
+      // Try custom_metadata first (new approach), fall back to DB lookup
+      let schoolId: string | undefined;
+      let planCode: string | undefined;
+      let isAnnual = false;
+
+      if (meta?.schoolId) {
+        schoolId = String(meta.schoolId);
+        planCode = String(meta.planCode ?? 'ecole');
+        isAnnual = Boolean(meta.isAnnual);
+      } else {
+        const txRow = await query<{ school_id: string; plan_code: string; is_annual: boolean }>(
+          `SELECT school_id, plan_code, is_annual FROM payment_transactions WHERE transaction_id=$1`, [txId]
+        );
+        if (txRow.rows[0]) {
+          schoolId = txRow.rows[0].school_id;
+          planCode = txRow.rows[0].plan_code;
+          isAnnual = txRow.rows[0].is_annual;
+        }
+      }
+
+      if (schoolId && planCode) {
+        const days = isAnnual ? 365 : 30;
         await query(
           `INSERT INTO school_subscriptions (school_id, plan_code, status, current_period_end, updated_at)
            VALUES ($1,$2,'active',NOW() + interval '1 day' * $3,NOW())
            ON CONFLICT (school_id) DO UPDATE SET plan_code=$2, status='active',
            current_period_end=NOW() + interval '1 day' * $3, updated_at=NOW()`,
-          [school_id, plan_code, days]
+          [schoolId, planCode, days]
         );
         await query(`UPDATE payment_transactions SET status='completed' WHERE transaction_id=$1`, [txId]);
       }

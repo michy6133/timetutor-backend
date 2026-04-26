@@ -4,6 +4,9 @@ import {
   registerTeacher,
   login,
   me,
+  updateMe,
+  deleteMe,
+  changePassword,
   refresh,
   logout,
   forgotPassword,
@@ -25,6 +28,9 @@ router.post('/reset-password', authLimiter, resetPassword);
 router.post('/refresh', refresh);
 router.post('/logout', logout);
 router.get('/me', authenticateJWT, me);
+router.put('/me', authenticateJWT, updateMe);
+router.delete('/me', authenticateJWT, deleteMe);
+router.post('/change-password', authenticateJWT, changePassword);
 router.get('/me/export', authenticateJWT, exportMyData);
 
 export default router;

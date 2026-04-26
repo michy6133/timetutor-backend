@@ -8,6 +8,7 @@ import billingRoutes from './billing.routes';
 import rosterRoutes from './roster.routes';
 import subjectsRoutes from './subjects.routes';
 import schoolClassesRoutes from './school-classes.routes';
+import schoolsRoutes from './schools.routes';
 
 const router = Router();
 
@@ -23,6 +24,7 @@ router.use('/teachers', teachersRoutes);
 router.use('/admin', adminRoutes);
 router.use('/billing', billingRoutes);
 router.use('/schools/roster', rosterRoutes);
+router.use('/schools', schoolsRoutes);
 router.use('/subjects', subjectsRoutes);
 router.use('/school-classes', schoolClassesRoutes);
 

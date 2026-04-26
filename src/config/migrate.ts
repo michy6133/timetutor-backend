@@ -10,6 +10,7 @@ const MIGRATIONS = [
   '003_auth_subscriptions.sql',
   '004_roster_payments_exchanges.sql',
   '005_school_classes_gdpr.sql',
+  '006_preset_subjects.sql',
 ];
 
 async function migrate() {

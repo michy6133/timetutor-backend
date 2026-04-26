@@ -276,6 +276,67 @@ export async function exportMyData(req: AuthRequest, res: Response, next: NextFu
   }
 }
 
+export async function updateMe(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.user) { res.status(401).json({ error: 'Non authentifié' }); return; }
+    const { fullName, phone } = z.object({
+      fullName: z.string().min(2).max(120).optional(),
+      phone: z.string().max(30).optional(),
+    }).parse(req.body);
+    const updates: string[] = [];
+    const values: unknown[] = [];
+    let idx = 1;
+    if (fullName !== undefined) { updates.push(`full_name = $${idx++}`); values.push(fullName); }
+    if (phone !== undefined) { updates.push(`phone = $${idx++}`); values.push(phone); }
+    if (updates.length === 0) { res.json({ message: 'Rien à mettre à jour' }); return; }
+    values.push(req.user.userId);
+    const result = await query<{ id: string; email: string; full_name: string; role: string; school_id: string }>(
+      `UPDATE users SET ${updates.join(', ')} WHERE id = $${idx} RETURNING id, email, full_name, role, school_id`,
+      values
+    );
+    const u = result.rows[0];
+    if (!u) throw createError('Utilisateur introuvable', 404);
+    res.json({ id: u.id, email: u.email, fullName: u.full_name, role: u.role, schoolId: u.school_id });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function deleteMe(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.user) { res.status(401).json({ error: 'Non authentifié' }); return; }
+    await query(`UPDATE users SET is_active = false WHERE id = $1`, [req.user.userId]);
+    res.clearCookie('tt_refresh', { path: '/api/v1/auth' });
+    res.json({ message: 'Compte supprimé' });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function changePassword(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.user) { res.status(401).json({ error: 'Non authentifié' }); return; }
+    const { currentPassword, newPassword } = z.object({
+      currentPassword: z.string().min(1),
+      newPassword: z.string().min(8),
+    }).parse(req.body);
+    const result = await query<{ password_hash: string }>(
+      `SELECT password_hash FROM users WHERE id = $1`,
+      [req.user.userId]
+    );
+    const user = result.rows[0];
+    if (!user) throw createError('Utilisateur introuvable', 404);
+    if (!await bcrypt.compare(currentPassword, user.password_hash)) {
+      throw createError('Mot de passe actuel incorrect', 401);
+    }
+    const newHash = await bcrypt.hash(newPassword, 12);
+    await query(`UPDATE users SET password_hash = $1 WHERE id = $2`, [newHash, req.user.userId]);
+    res.json({ message: 'Mot de passe mis à jour' });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function me(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     if (!req.user) { res.status(401).json({ error: 'Non authentifié' }); return; }

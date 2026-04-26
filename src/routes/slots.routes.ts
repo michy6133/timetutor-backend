@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import {
   listSlots, createSlot, createSlotsBatch, duplicateSlotsFromSession,
+  deleteSlot, duplicateSlotToDays,
   selectSlot, deselectSlot,
   validateSlot, unvalidateSlot,
   contactRequest, listMyContactRequests, acceptContactRequest, rejectContactRequest,
@@ -14,6 +15,8 @@ router.get('/', authenticateJWT, listSlots);
 router.post('/', authenticateJWT, requireRole('director'), createSlot);
 router.post('/batch', authenticateJWT, requireRole('director'), createSlotsBatch);
 router.post('/duplicate-from', authenticateJWT, requireRole('director'), duplicateSlotsFromSession);
+router.delete('/:slotId', authenticateJWT, requireRole('director'), deleteSlot);
+router.post('/:slotId/duplicate', authenticateJWT, requireRole('director'), duplicateSlotToDays);
 router.post('/:id/validate', authenticateJWT, requireRole('director'), validateSlot);
 router.post('/:id/unvalidate', authenticateJWT, requireRole('director'), unvalidateSlot);
 
