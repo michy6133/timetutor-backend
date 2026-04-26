@@ -9,6 +9,7 @@ const MIGRATIONS = [
   '002_teacher_role.sql',
   '003_auth_subscriptions.sql',
   '004_roster_payments_exchanges.sql',
+  '005_school_classes_gdpr.sql',
 ];
 
 async function migrate() {

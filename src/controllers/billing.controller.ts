@@ -11,6 +11,23 @@ const PLAN_PRICES: Record<string, number> = {
   etablissement: 19900,
 };
 
+export async function listMyTransactions(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.user?.schoolId) { res.status(401).json({ error: 'Non authentifié' }); return; }
+    const { rows } = await query(
+      `SELECT id, transaction_id, plan_code, amount, is_annual, status, created_at
+       FROM payment_transactions
+       WHERE school_id = $1
+       ORDER BY created_at DESC
+       LIMIT 100`,
+      [req.user.schoolId]
+    );
+    res.json(rows);
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function initiateCheckout(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     if (!req.user?.schoolId) { res.status(401).json({ error: 'Non authentifié' }); return; }

@@ -2,6 +2,7 @@ import type { Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
 import type { AuthRequest } from '../types';
+import { resolveLimits } from '../services/subscription.service';
 
 export async function listSchools(_req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -171,7 +172,45 @@ export async function getMySubscription(req: AuthRequest, res: Response, next: N
       rows = retry.rows;
       if (!rows[0]) { res.status(404).json({ error: 'Abonnement introuvable' }); return; }
     }
-    res.json(rows[0]);
+    const row = rows[0] as Record<string, unknown> & {
+      limits_json: Record<string, number | undefined>;
+      limits_override_json: Record<string, number | undefined>;
+    };
+    const limits = resolveLimits(row.limits_json ?? {}, row.limits_override_json ?? {});
+    const [sessCount, busiestTeachers] = await Promise.all([
+      query<{ c: string }>('SELECT COUNT(*)::text AS c FROM sessions WHERE school_id = $1', [req.user!.schoolId]),
+      query<{ m: string }>(
+        `SELECT COALESCE(MAX(cnt), 0)::text AS m FROM (
+           SELECT COUNT(*)::int AS cnt FROM teachers t
+           JOIN sessions s ON s.id = t.session_id WHERE s.school_id = $1 GROUP BY s.id
+         ) x`,
+        [req.user!.schoolId]
+      ),
+    ]);
+    const sessionsCount = parseInt(sessCount.rows[0]?.c ?? '0', 10);
+    const maxTeachersInSession = parseInt(busiestTeachers.rows[0]?.m ?? '0', 10);
+    const usageAlerts: string[] = [];
+    const sl = limits.maxSessionsPerSchool;
+    if (sl != null) {
+      if (sessionsCount >= sl) usageAlerts.push(`Limite du plan atteinte : ${sessionsCount}/${sl} sessions.`);
+      else if (sessionsCount >= Math.max(1, Math.floor(sl * 0.8))) {
+        usageAlerts.push(`Vous approchez de la limite de sessions du plan (${sessionsCount}/${sl}).`);
+      }
+    }
+    const tl = limits.maxTeachersPerSession;
+    if (tl != null && maxTeachersInSession >= Math.max(1, Math.floor(tl * 0.8))) {
+      usageAlerts.push(`Au moins une session approche la limite d'enseignants par session (${maxTeachersInSession}/${tl}).`);
+    }
+    res.json({
+      ...row,
+      usage: {
+        sessionsCount,
+        sessionsLimit: sl ?? null,
+        maxTeachersInSession,
+        teachersPerSessionLimit: tl ?? null,
+      },
+      usageAlerts,
+    });
   } catch (err) {
     next(err);
   }

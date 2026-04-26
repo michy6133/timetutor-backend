@@ -41,8 +41,8 @@ export async function authenticateMagicToken(
     return;
   }
   try {
-    const result = await query<{ teacher_id: string; session_id: string; expires_at: Date; used: boolean }>(
-      `SELECT teacher_id, session_id, expires_at, used FROM magic_tokens WHERE token = $1`,
+    const result = await query<{ teacher_id: string; session_id: string; expires_at: Date }>(
+      `SELECT teacher_id, session_id, expires_at FROM magic_tokens WHERE token = $1`,
       [token]
     );
     const row = result.rows[0];
@@ -50,8 +50,8 @@ export async function authenticateMagicToken(
       res.status(401).json({ error: 'Lien invalide' });
       return;
     }
-    if (row.used || new Date() > row.expires_at) {
-      res.status(401).json({ error: 'Lien expiré ou déjà utilisé' });
+    if (new Date() > row.expires_at) {
+      res.status(401).json({ error: 'Lien expiré' });
       return;
     }
     req.teacher = { teacherId: row.teacher_id, sessionId: row.session_id, token };

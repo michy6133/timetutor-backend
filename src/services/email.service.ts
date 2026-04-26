@@ -172,7 +172,7 @@ export async function sendContactRequest(
         ${message ? `<blockquote style="border-left:3px solid #8b5cf6;padding-left:16px;color:#374151">${message}</blockquote>` : ''}
         <p style="color:#9ca3af;font-size:12px">
           Vous pouvez libérer ce créneau depuis votre lien d'invitation,
-          ou l'ignorer pour le conserver. Le directeur a été notifié.
+          ou l'ignorer pour le conserver. Tant que le créneau n'est pas validé, vous gardez la main.
         </p>
         <p style="color:#9ca3af;font-size:12px">TimeTutor — Gestion intelligente des emplois du temps</p>
       </div>

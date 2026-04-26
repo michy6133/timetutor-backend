@@ -10,6 +10,7 @@ const sessionSchema = z.object({
   name: z.string().min(2),
   academicYear: z.string().min(4),
   deadline: z.string().datetime().optional(),
+  schoolClassId: z.string().uuid().nullable().optional(),
   rules: z.object({
     minSlotsPerTeacher: z.number().int().min(1).default(1),
     maxSlotsPerTeacher: z.number().int().min(1).default(20),
@@ -23,15 +24,22 @@ const sessionSchema = z.object({
 export async function listSessions(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const schoolId = req.user!.schoolId;
+    const classFilter = typeof req.query.schoolClassId === 'string' && z.string().uuid().safeParse(req.query.schoolClassId).success
+      ? req.query.schoolClassId
+      : null;
     const { rows } = await query(
       `SELECT s.*, sr.min_slots_per_teacher, sr.max_slots_per_teacher,
+        sc.name AS school_class_name,
         (SELECT COUNT(*) FROM time_slots WHERE session_id = s.id) AS total_slots,
         (SELECT COUNT(*) FROM time_slots WHERE session_id = s.id AND status != 'free') AS taken_slots,
         (SELECT COUNT(*) FROM teachers WHERE session_id = s.id) AS total_teachers
        FROM sessions s
        LEFT JOIN session_rules sr ON sr.session_id = s.id
-       WHERE s.school_id = $1 ORDER BY s.created_at DESC`,
-      [schoolId]
+       LEFT JOIN school_classes sc ON sc.id = s.school_class_id
+       WHERE s.school_id = $1
+         AND ($2::uuid IS NULL OR s.school_class_id = $2)
+       ORDER BY s.created_at DESC`,
+      [schoolId, classFilter]
     );
     res.json(rows);
   } catch (err) { next(err); }
@@ -43,13 +51,21 @@ export async function createSession(req: AuthRequest, res: Response, next: NextF
     const { schoolId, userId } = req.user!;
     if (!schoolId) throw createError('Utilisateur non rattaché à une école', 403);
     await assertCanCreateSession(schoolId);
+    let schoolClassId: string | null = data.schoolClassId ?? null;
+    if (schoolClassId) {
+      const cls = await query<{ id: string }>(
+        `SELECT id FROM school_classes WHERE id = $1 AND school_id = $2 AND is_active = true`,
+        [schoolClassId, schoolId]
+      );
+      if (!cls.rows[0]) throw createError('Classe invalide ou inactive', 400);
+    }
     const client = await getClient();
     try {
       await client.query('BEGIN');
       const sess = await client.query<{ id: string }>(
-        `INSERT INTO sessions (school_id, created_by, name, academic_year, deadline)
-         VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-        [schoolId, userId, data.name, data.academicYear, data.deadline ?? null]
+        `INSERT INTO sessions (school_id, created_by, name, academic_year, deadline, school_class_id)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+        [schoolId, userId, data.name, data.academicYear, data.deadline ?? null, schoolClassId]
       );
       const sessionId = sess.rows[0]!.id;
       const r = data.rules ?? ({} as any);
@@ -73,6 +89,7 @@ export async function getSession(req: AuthRequest, res: Response, next: NextFunc
     const { id } = req.params;
     const { rows } = await query(
       `SELECT s.*, sr.*,
+        sc.name AS school_class_name,
         (SELECT COUNT(*) FROM time_slots WHERE session_id = s.id) AS total_slots,
         (SELECT COUNT(*) FROM time_slots WHERE session_id = s.id AND status = 'taken') AS taken_slots,
         (SELECT COUNT(*) FROM time_slots WHERE session_id = s.id AND status = 'validated') AS validated_slots,
@@ -80,6 +97,7 @@ export async function getSession(req: AuthRequest, res: Response, next: NextFunc
         (SELECT COUNT(*) FROM teachers WHERE session_id = s.id AND status != 'pending') AS responded_teachers
        FROM sessions s
        LEFT JOIN session_rules sr ON sr.session_id = s.id
+       LEFT JOIN school_classes sc ON sc.id = s.school_class_id
        WHERE s.id = $1 AND s.school_id = $2`,
       [id, req.user!.schoolId]
     );
@@ -92,10 +110,36 @@ export async function updateSession(req: AuthRequest, res: Response, next: NextF
   try {
     const { id } = req.params;
     const data = sessionSchema.partial().parse(req.body);
+    const schoolId = req.user!.schoolId;
+
+    if (Object.prototype.hasOwnProperty.call(data, 'schoolClassId') && data.schoolClassId != null) {
+      const cls = await query<{ id: string }>(
+        `SELECT id FROM school_classes WHERE id = $1 AND school_id = $2 AND is_active = true`,
+        [data.schoolClassId, schoolId]
+      );
+      if (!cls.rows[0]) throw createError('Classe invalide ou inactive', 400);
+    }
+
+    const fragments: string[] = [];
+    const values: unknown[] = [];
+    const add = (col: string, val: unknown) => {
+      fragments.push(`${col} = $${values.length + 1}`);
+      values.push(val);
+    };
+    if (data.name !== undefined) add('name', data.name);
+    if (data.academicYear !== undefined) add('academic_year', data.academicYear);
+    if (data.deadline !== undefined) add('deadline', data.deadline);
+    if (Object.prototype.hasOwnProperty.call(data, 'schoolClassId')) add('school_class_id', data.schoolClassId ?? null);
+
+    if (fragments.length === 0) {
+      res.json({ message: 'Session mise à jour' });
+      return;
+    }
+    fragments.push('updated_at = NOW()');
+    values.push(id, schoolId);
     await query(
-      `UPDATE sessions SET name=COALESCE($1,name), academic_year=COALESCE($2,academic_year),
-       deadline=COALESCE($3,deadline), updated_at=NOW() WHERE id=$4 AND school_id=$5`,
-      [data.name, data.academicYear, data.deadline, id, req.user!.schoolId]
+      `UPDATE sessions SET ${fragments.join(', ')} WHERE id = $${values.length - 1} AND school_id = $${values.length}`,
+      values
     );
     res.json({ message: 'Session mise à jour' });
   } catch (err) { next(err); }
@@ -216,31 +260,18 @@ export async function exportSessionPdf(req: AuthRequest, res: Response, next: Ne
     );
     const rows = rowsRes.rows;
 
-    const teachersRes = await query<{
-      full_name: string;
-      email: string;
-      phone: string | null;
-      status: string;
-      subject_name: string | null;
-      slots_count: string;
-    }>(
-      `SELECT t.full_name, t.email, t.phone, t.status,
-              (SELECT STRING_AGG(DISTINCT sb.name, ', ')
-               FROM slot_selections ss2
-               JOIN time_slots ts2 ON ts2.id = ss2.slot_id
-               LEFT JOIN subjects sb ON sb.id = ts2.subject_id
-               WHERE ss2.teacher_id = t.id) AS subject_name,
-              (SELECT COUNT(*) FROM slot_selections ss3 WHERE ss3.teacher_id = t.id) AS slots_count
-       FROM teachers t
-       WHERE t.session_id = $1
-       ORDER BY t.full_name`,
+    const teacherCountRes = await query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count
+       FROM teachers
+       WHERE session_id = $1`,
       [id]
     );
+    const teacherCount = parseInt(teacherCountRes.rows[0]?.count ?? '0', 10);
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename="emploi-du-temps-${session.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}.pdf"`
+      `attachment; filename="emploi-du-temps-${session.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}-${session.academic_year.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}.pdf"`
     );
 
     const doc = new PDFDocument({
@@ -280,7 +311,7 @@ export async function exportSessionPdf(req: AuthRequest, res: Response, next: Ne
         deadline: session.deadline,
         totalSlots: rows.length,
         filledSlots: rows.filter((r) => r.teacher_name).length,
-        teachers: teachersRes.rows.length,
+        teachers: teacherCount,
         generatedAt,
       });
       cursorY += 12;
@@ -333,7 +364,7 @@ export async function exportSessionPdf(req: AuthRequest, res: Response, next: Ne
             deadline: session.deadline,
             totalSlots: rows.length,
             filledSlots: rows.filter((r) => r.teacher_name).length,
-            teachers: teachersRes.rows.length,
+            teachers: teacherCount,
             generatedAt,
           });
           cursorY += META_GAP;
@@ -355,40 +386,6 @@ export async function exportSessionPdf(req: AuthRequest, res: Response, next: Ne
         );
 
         drawLegend(doc, { x: marginX, y: pageHeight - 70, width: contentWidth });
-        drawFooter(doc, { x: marginX, y: pageHeight - 32, width: contentWidth });
-      });
-    }
-
-    if (teachersRes.rows.length > 0) {
-      const T_HEADER_H = 22;
-      const T_ROW_H = 22;
-      const T_TOP = marginY + 80;
-      const T_BOTTOM = pageHeight - 60;
-      const T_BODY = T_BOTTOM - T_TOP - T_HEADER_H;
-      const teachersPerPage = Math.max(1, Math.floor(T_BODY / T_ROW_H));
-
-      const teacherChunks: Array<typeof teachersRes.rows> = [];
-      let tIdx = 0;
-      while (tIdx < teachersRes.rows.length) {
-        teacherChunks.push(teachersRes.rows.slice(tIdx, tIdx + teachersPerPage));
-        tIdx += teachersPerPage;
-      }
-
-      teacherChunks.forEach((chunk, chunkIdx) => {
-        doc.addPage();
-        const partLabel =
-          teacherChunks.length > 1 ? ` · Partie ${chunkIdx + 1}/${teacherChunks.length}` : '';
-        drawPageChrome(
-          `Enseignants de la session · ${session.academic_year}${partLabel}`
-        );
-        drawTeachersTable(doc, chunk, {
-          x: marginX,
-          y: T_TOP,
-          width: contentWidth,
-          rowHeight: T_ROW_H,
-          headerHeight: T_HEADER_H,
-          include,
-        });
         drawFooter(doc, { x: marginX, y: pageHeight - 32, width: contentWidth });
       });
     }
@@ -650,9 +647,9 @@ function drawSlotCell(
   if (include.includeSubject && cell.subject_name) {
     doc
       .font('Helvetica-Bold')
-      .fontSize(8.5)
+      .fontSize(9)
       .fillColor(accent)
-      .text(cell.subject_name, textX, textY, { width: textWidth, ellipsis: true, lineBreak: false });
+      .text(`MATIERE: ${cell.subject_name}`, textX, textY, { width: textWidth, ellipsis: true, lineBreak: false });
     textY += 11;
   }
 
@@ -738,102 +735,3 @@ function drawFooter(doc: PDFKit.PDFDocument, opts: { x: number; y: number; width
     );
 }
 
-function drawTeachersTable(
-  doc: PDFKit.PDFDocument,
-  teachers: Array<{
-    full_name: string;
-    email: string;
-    phone: string | null;
-    status: string;
-    subject_name: string | null;
-    slots_count: string;
-  }>,
-  opts: {
-    x: number;
-    y: number;
-    width: number;
-    rowHeight: number;
-    headerHeight: number;
-    include: {
-      includeTeacherName: boolean;
-      includeContact: boolean;
-      includeEmail: boolean;
-      includeSubject: boolean;
-      includeRoom: boolean;
-    };
-  }
-): void {
-  const { x, y, width, rowHeight, headerHeight, include } = opts;
-
-  const columns: { key: 'name' | 'email' | 'phone' | 'subject' | 'slots' | 'status'; label: string; ratio: number }[] = [
-    { key: 'name', label: 'Enseignant', ratio: 0.24 },
-  ];
-  if (include.includeEmail) columns.push({ key: 'email', label: 'Email', ratio: 0.26 });
-  if (include.includeContact) columns.push({ key: 'phone', label: 'Téléphone', ratio: 0.14 });
-  if (include.includeSubject) columns.push({ key: 'subject', label: 'Matière(s)', ratio: 0.2 });
-  columns.push({ key: 'slots', label: 'Créneaux', ratio: 0.08 });
-  columns.push({ key: 'status', label: 'Statut', ratio: 0.12 });
-
-  const totalRatio = columns.reduce((a, b) => a + b.ratio, 0);
-  const normalized = columns.map((c) => ({ ...c, width: (c.ratio / totalRatio) * width }));
-
-  doc.save();
-  doc.roundedRect(x, y, width, headerHeight, 4).fill(HEX_CRIMSON);
-  doc.restore();
-
-  let cx = x;
-  normalized.forEach((col) => {
-    doc
-      .font('Helvetica-Bold')
-      .fontSize(9)
-      .fillColor('#ffffff')
-      .text(col.label.toUpperCase(), cx + 8, y + 7, { width: col.width - 12, lineBreak: false });
-    cx += col.width;
-  });
-
-  let ry = y + headerHeight;
-  teachers.forEach((t, idx) => {
-    const alt = idx % 2 === 0;
-    doc.save();
-    doc.rect(x, ry, width, rowHeight).fill(alt ? '#ffffff' : HEX_BLUSH_SOFT);
-    doc.restore();
-
-    let rx = x;
-    normalized.forEach((col) => {
-      let value = '';
-      if (col.key === 'name') value = t.full_name;
-      if (col.key === 'email') value = t.email;
-      if (col.key === 'phone') value = t.phone ?? '—';
-      if (col.key === 'subject') value = t.subject_name ?? '—';
-      if (col.key === 'slots') value = t.slots_count;
-      if (col.key === 'status') value = teacherStatusLabel(t.status);
-
-      const isName = col.key === 'name';
-      doc
-        .font(isName ? 'Helvetica-Bold' : 'Helvetica')
-        .fontSize(8.5)
-        .fillColor(HEX_NAVY)
-        .text(value, rx + 8, ry + 7, { width: col.width - 12, ellipsis: true, lineBreak: false });
-      rx += col.width;
-    });
-
-    doc.save();
-    doc.strokeColor(HEX_BORDER).lineWidth(0.3);
-    doc.moveTo(x, ry + rowHeight).lineTo(x + width, ry + rowHeight).stroke();
-    doc.restore();
-
-    ry += rowHeight;
-  });
-
-  doc.save();
-  doc
-    .strokeColor(HEX_CRIMSON)
-    .lineWidth(0.6)
-    .roundedRect(x, y, width, headerHeight + rowHeight * teachers.length, 4)
-    .stroke();
-  doc.restore();
-}
-
-function teacherStatusLabel(status: string): string {
-  return ({ pending: 'En attente', active: 'Actif', done: 'Terminé' } as Record<string, string>)[status] ?? status;
-}

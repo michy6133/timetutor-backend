@@ -7,6 +7,97 @@ import { sendContactRequest } from '../services/email.service';
 import type { AuthRequest, TeacherRequest } from '../types';
 import { createError } from '../middleware/errorHandler';
 
+const TIGHT_CROSS_SCHOOL_GAP_MINUTES = 60;
+
+function timeToMinutes(t: string): number {
+  const s = t.length >= 5 ? t.substring(0, 5) : t;
+  const [h, m] = s.split(':').map((x) => parseInt(x, 10));
+  return (h || 0) * 60 + (m || 0);
+}
+
+/** Null if intervals overlap (strict overlap or nested). Non-negative gap in minutes if disjoint or merely touching. */
+function gapMinutesBetweenIntervals(
+  aStart: number,
+  aEnd: number,
+  bStart: number,
+  bEnd: number
+): number | null {
+  if (aStart < bEnd && aEnd > bStart) return null;
+  if (aEnd <= bStart) return bStart - aEnd;
+  if (bEnd <= aStart) return aStart - bEnd;
+  return null;
+}
+
+function formatHm(t: string): string {
+  return t.length >= 5 ? t.substring(0, 5) : t;
+}
+
+async function crossSchoolTightScheduleWarnings(
+  teacherId: string,
+  newSlotId: string
+): Promise<string[]> {
+  const slotRes = await query<{
+    day_of_week: string;
+    start_time: string;
+    end_time: string;
+    school_id: string;
+  }>(
+    `SELECT ts.day_of_week, ts.start_time::text, ts.end_time::text, sess.school_id
+     FROM time_slots ts
+     JOIN sessions sess ON sess.id = ts.session_id
+     WHERE ts.id = $1`,
+    [newSlotId]
+  );
+  const ns = slotRes.rows[0];
+  if (!ns) return [];
+
+  const emailRes = await query<{ email: string }>(
+    `SELECT LOWER(TRIM(email)) AS email FROM teachers WHERE id = $1`,
+    [teacherId]
+  );
+  const email = emailRes.rows[0]?.email;
+  if (!email) return [];
+
+  const others = await query<{
+    day_of_week: string;
+    start_time: string;
+    end_time: string;
+    school_name: string;
+    school_id: string;
+    session_name: string;
+  }>(
+    `SELECT ts.day_of_week, ts.start_time::text, ts.end_time::text,
+            sch.name AS school_name, sch.id AS school_id, sess.name AS session_name
+     FROM slot_selections ss
+     JOIN teachers t ON t.id = ss.teacher_id
+     JOIN time_slots ts ON ts.id = ss.slot_id
+     JOIN sessions sess ON sess.id = ss.session_id
+     JOIN schools sch ON sch.id = sess.school_id
+     WHERE LOWER(TRIM(t.email)) = $1
+       AND ts.id <> $2
+       AND ts.day_of_week = $3`,
+    [email, newSlotId, ns.day_of_week]
+  );
+
+  const warnings: string[] = [];
+  const curSchool = ns.school_id;
+  const nS = timeToMinutes(ns.start_time);
+  const nE = timeToMinutes(ns.end_time);
+
+  for (const o of others.rows) {
+    if (o.school_id === curSchool) continue;
+    const oS = timeToMinutes(o.start_time);
+    const oE = timeToMinutes(o.end_time);
+    const gap = gapMinutesBetweenIntervals(nS, nE, oS, oE);
+    if (gap !== null && gap <= TIGHT_CROSS_SCHOOL_GAP_MINUTES) {
+      warnings.push(
+        `Même jour, une autre école (${o.school_name}) : « ${o.session_name} » ${formatHm(o.start_time)}–${formatHm(o.end_time)} est à moins d’1 h de ce créneau (${formatHm(ns.start_time)}–${formatHm(ns.end_time)}). Prévoyez le trajet.`
+      );
+    }
+  }
+  return [...new Set(warnings)];
+}
+
 const slotSchema = z.object({
   subjectId: z.string().uuid().optional(),
   dayOfWeek: z.enum(['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi']),
@@ -26,10 +117,19 @@ export async function listSlots(
   try {
     const { sessionId } = req.params;
     const { rows } = await query(
-      `SELECT ts.*, s.name AS subject_name, s.color AS subject_color,
-        ss.teacher_id AS selected_by_teacher_id,
-        t.full_name AS teacher_name,
-        ss.validated_at
+      `SELECT ts.id AS "id",
+              ts.session_id AS "sessionId",
+              ts.subject_id AS "subjectId",
+              s.name AS "subjectName",
+              s.color AS "subjectColor",
+              ss.teacher_id AS "selectedByTeacherId",
+              t.full_name AS "teacherName",
+              ss.validated_at AS "validatedAt",
+              ts.day_of_week AS "dayOfWeek",
+              substring(ts.start_time::text, 1, 5) AS "startTime",
+              substring(ts.end_time::text, 1, 5) AS "endTime",
+              ts.room,
+              ts.status
        FROM time_slots ts
        LEFT JOIN subjects s ON s.id = ts.subject_id
        LEFT JOIN slot_selections ss ON ss.slot_id = ts.id
@@ -117,6 +217,27 @@ export async function selectSlot(req: TeacherRequest, res: Response, next: NextF
     if (!slot) throw createError('Créneau introuvable', 404);
     if (slot.status !== 'free') throw createError('Créneau déjà pris', 409);
 
+    const overlapRes = await query<{ count: string }>(
+      `WITH teacher_identity AS (
+         SELECT LOWER(email) AS email
+         FROM teachers
+         WHERE id = $1
+       )
+       SELECT COUNT(*)::text AS count
+       FROM slot_selections ss
+       JOIN teachers t ON t.id = ss.teacher_id
+       JOIN teacher_identity ti ON LOWER(t.email) = ti.email
+       JOIN time_slots existing_slot ON existing_slot.id = ss.slot_id
+       JOIN time_slots target_slot ON target_slot.id = $2
+       WHERE existing_slot.day_of_week = target_slot.day_of_week
+         AND existing_slot.start_time < target_slot.end_time
+         AND existing_slot.end_time > target_slot.start_time`,
+      [teacherId, slotId]
+    );
+    if (parseInt(overlapRes.rows[0]?.count ?? '0', 10) > 0) {
+      throw createError('Conflit détecté: vous avez déjà un créneau qui se chevauche (même dans une autre école)', 409);
+    }
+
     const locked = await lockSlot(slotId, teacherId);
     if (!locked) throw createError('Créneau pris par un autre enseignant', 409);
 
@@ -162,7 +283,74 @@ export async function selectSlot(req: TeacherRequest, res: Response, next: NextF
         );
       }
     }
-    res.json({ message: 'Créneau sélectionné' });
+    const warnings = await crossSchoolTightScheduleWarnings(teacherId, slotId);
+    res.json({ message: 'Créneau sélectionné', warnings });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function duplicateSlotsFromSession(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { sessionId: targetSessionId } = req.params;
+    const { sourceSessionId } = z.object({ sourceSessionId: z.string().uuid() }).parse(req.body);
+    const schoolId = req.user!.schoolId;
+    if (!schoolId) throw createError('Non autorisé', 403);
+
+    const pair = await query<{ t_school: string; s_school: string }>(
+      `SELECT t.school_id AS t_school, s.school_id AS s_school
+       FROM sessions t
+       JOIN sessions s ON s.id = $2
+       WHERE t.id = $1`,
+      [targetSessionId, sourceSessionId]
+    );
+    const p = pair.rows[0];
+    if (!p) throw createError('Session introuvable', 404);
+    if (p.t_school !== schoolId || p.s_school !== schoolId) throw createError('Non autorisé', 403);
+
+    const slots = await query<{
+      subject_name: string | null;
+      day_of_week: string;
+      start_time: string;
+      end_time: string;
+      room: string | null;
+    }>(
+      `SELECT sub.name AS subject_name, ts.day_of_week, ts.start_time::text, ts.end_time::text, ts.room
+       FROM time_slots ts
+       LEFT JOIN subjects sub ON sub.id = ts.subject_id
+       WHERE ts.session_id = $1
+       ORDER BY ts.day_of_week, ts.start_time`,
+      [sourceSessionId]
+    );
+
+    const client = await getClient();
+    let created = 0;
+    try {
+      await client.query('BEGIN');
+      for (const row of slots.rows) {
+        let subjectId: string | null = null;
+        if (row.subject_name) {
+          const sub = await client.query<{ id: string }>(
+            `SELECT id FROM subjects WHERE school_id = $1 AND name = $2 LIMIT 1`,
+            [schoolId, row.subject_name]
+          );
+          subjectId = sub.rows[0]?.id ?? null;
+        }
+        await client.query(
+          `INSERT INTO time_slots (session_id, subject_id, day_of_week, start_time, end_time, room, status)
+           VALUES ($1,$2,$3,$4::time,$5::time,$6,'free')`,
+          [targetSessionId, subjectId, row.day_of_week, row.start_time, row.end_time, row.room ?? null]
+        );
+        created++;
+      }
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+    res.status(201).json({ duplicated: created });
   } catch (err) {
     next(err);
   }
@@ -248,6 +436,7 @@ export async function contactRequest(req: TeacherRequest, res: Response, next: N
     const targetTeacherId = selRes.rows[0]?.teacher_id;
     if (!targetTeacherId) throw createError('Enseignant cible introuvable', 404);
 
+    if (targetTeacherId === teacherId) throw createError('Vous possédez déjà ce créneau', 400);
     await query(
       `INSERT INTO contact_requests (slot_id, requester_teacher_id, target_teacher_id, session_id, message)
        VALUES ($1,$2,$3,$4,$5)`,
@@ -274,20 +463,163 @@ export async function contactRequest(req: TeacherRequest, res: Response, next: N
       );
     }
 
-    const dirRes = await query<{ created_by: string }>(
-      `SELECT created_by FROM sessions WHERE id=$1`,
-      [sessionId]
+    res.status(201).json({ message: 'Demande envoyée au professeur concerné' });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function listMyContactRequests(req: TeacherRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { sessionId } = req.params;
+    const { teacherId } = req.teacher!;
+    const incomingRes = await query(
+      `SELECT cr.id,
+              cr.status,
+              cr.message,
+              cr.created_at AS "createdAt",
+              cr.slot_id AS "slotId",
+              req_t.full_name AS "requesterName",
+              ts.day_of_week AS "dayOfWeek",
+              substring(ts.start_time::text, 1, 5) AS "startTime",
+              substring(ts.end_time::text, 1, 5) AS "endTime"
+       FROM contact_requests cr
+       JOIN teachers req_t ON req_t.id = cr.requester_teacher_id
+       JOIN time_slots ts ON ts.id = cr.slot_id
+       WHERE cr.target_teacher_id = $1
+         AND cr.session_id = $2
+       ORDER BY cr.created_at DESC`,
+      [teacherId, sessionId]
     );
-    if (dirRes.rows[0]) {
-      await notifyDirector(
-        dirRes.rows[0].created_by,
-        'contact_request',
-        'Demande de contact',
-        `Un enseignant souhaite récupérer un créneau`,
-        { slotId, sessionId }
-      );
+    const outgoingRes = await query(
+      `SELECT cr.id,
+              cr.status,
+              cr.message,
+              cr.created_at AS "createdAt",
+              cr.slot_id AS "slotId",
+              tgt_t.full_name AS "targetName",
+              ts.day_of_week AS "dayOfWeek",
+              substring(ts.start_time::text, 1, 5) AS "startTime",
+              substring(ts.end_time::text, 1, 5) AS "endTime"
+       FROM contact_requests cr
+       JOIN teachers tgt_t ON tgt_t.id = cr.target_teacher_id
+       JOIN time_slots ts ON ts.id = cr.slot_id
+       WHERE cr.requester_teacher_id = $1
+         AND cr.session_id = $2
+       ORDER BY cr.created_at DESC`,
+      [teacherId, sessionId]
+    );
+    res.json({ incoming: incomingRes.rows, outgoing: outgoingRes.rows });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function acceptContactRequest(req: TeacherRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { sessionId, requestId } = req.params;
+    const { teacherId } = req.teacher!;
+
+    const requestRes = await query<{
+      slot_id: string;
+      requester_teacher_id: string;
+      target_teacher_id: string;
+      status: string;
+      slot_status: string;
+    }>(
+      `SELECT cr.slot_id, cr.requester_teacher_id, cr.target_teacher_id, cr.status,
+              ts.status AS slot_status
+       FROM contact_requests cr
+       JOIN time_slots ts ON ts.id = cr.slot_id
+       WHERE cr.id = $1
+         AND cr.session_id = $2`,
+      [requestId, sessionId]
+    );
+    const request = requestRes.rows[0];
+    if (!request) throw createError('Demande introuvable', 404);
+    if (request.target_teacher_id !== teacherId) throw createError('Demande non autorisée', 403);
+    if (request.status !== 'pending') throw createError('Demande déjà traitée', 409);
+    if (request.slot_status === 'validated') throw createError('Créneau validé: négociation impossible', 409);
+
+    const overlapRes = await query<{ count: string }>(
+      `WITH requester_identity AS (
+         SELECT LOWER(email) AS email
+         FROM teachers
+         WHERE id = $1
+       )
+       SELECT COUNT(*)::text AS count
+       FROM slot_selections ss
+       JOIN teachers t ON t.id = ss.teacher_id
+       JOIN requester_identity ri ON LOWER(t.email) = ri.email
+       JOIN time_slots existing_slot ON existing_slot.id = ss.slot_id
+       JOIN time_slots target_slot ON target_slot.id = $2
+       WHERE ss.slot_id != $2
+         AND existing_slot.day_of_week = target_slot.day_of_week
+         AND existing_slot.start_time < target_slot.end_time
+         AND existing_slot.end_time > target_slot.start_time`,
+      [request.requester_teacher_id, request.slot_id]
+    );
+    if (parseInt(overlapRes.rows[0]?.count ?? '0', 10) > 0) {
+      throw createError('Impossible de transferer: le demandeur a déjà un créneau en conflit', 409);
     }
-    res.status(201).json({ message: 'Demande de contact envoyée' });
+
+    const client = await getClient();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `DELETE FROM slot_selections WHERE slot_id=$1 AND teacher_id=$2`,
+        [request.slot_id, teacherId]
+      );
+      await client.query(
+        `INSERT INTO slot_selections (slot_id, teacher_id, session_id) VALUES ($1,$2,$3)
+         ON CONFLICT (slot_id) DO UPDATE SET teacher_id = EXCLUDED.teacher_id, session_id = EXCLUDED.session_id`,
+        [request.slot_id, request.requester_teacher_id, sessionId]
+      );
+      await client.query(
+        `UPDATE time_slots SET status='taken', updated_at=NOW() WHERE id=$1`,
+        [request.slot_id]
+      );
+      await client.query(
+        `UPDATE contact_requests
+         SET status='accepted', updated_at=NOW()
+         WHERE id=$1`,
+        [requestId]
+      );
+      await client.query(
+        `UPDATE contact_requests
+         SET status='cancelled', updated_at=NOW()
+         WHERE slot_id=$1 AND status='pending' AND id != $2`,
+        [request.slot_id, requestId]
+      );
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    res.json({ message: 'Demande acceptée et créneau transféré' });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function rejectContactRequest(req: TeacherRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { sessionId, requestId } = req.params;
+    const { teacherId } = req.teacher!;
+    const result = await query(
+      `UPDATE contact_requests
+       SET status='rejected', updated_at=NOW()
+       WHERE id=$1
+         AND session_id=$2
+         AND target_teacher_id=$3
+         AND status='pending'`,
+      [requestId, sessionId, teacherId]
+    );
+    if (result.rowCount === 0) throw createError('Demande introuvable ou déjà traitée', 404);
+    res.json({ message: 'Demande refusée' });
   } catch (err) {
     next(err);
   }

@@ -13,20 +13,39 @@ const teacherSchema = z.object({
   fullName: z.string().min(2),
   email: z.string().email(),
   phone: z.string().optional(),
-  subjectIds: z.array(z.string().uuid()).default([]),
+  subjectIds: z.array(z.string().uuid()).min(1, 'Au moins une matière est requise').max(1, 'Une seule matière est autorisée'),
 });
 
 const teacherUpdateSchema = z.object({
   fullName: z.string().min(2).optional(),
   email: z.string().email().optional(),
   phone: z.string().optional(),
+  subjectIds: z.array(z.string().uuid()).min(1, 'Au moins une matière est requise').max(1, 'Une seule matière est autorisée').optional(),
 });
+
+async function assertSubjectsBelongToSchool(subjectIds: string[], schoolId: string): Promise<void> {
+  if (!subjectIds.length) throw createError('Une matière est obligatoire', 400);
+  const { rows } = await query<{ count: string }>(
+    `SELECT COUNT(*)::text AS count
+     FROM subjects
+     WHERE school_id = $1
+       AND id = ANY($2::uuid[])`,
+    [schoolId, subjectIds]
+  );
+  const count = parseInt(rows[0]?.count ?? '0', 10);
+  if (count !== subjectIds.length) {
+    throw createError('Matière invalide pour cet établissement', 400);
+  }
+}
 
 export async function listTeachers(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const { sessionId } = req.params;
     const { rows } = await query(
       `SELECT t.*,
+        (SELECT COALESCE(json_agg(json_build_object('id', sb.id, 'name', sb.name) ORDER BY sb.name), '[]'::json)
+         FROM subjects sb
+         WHERE sb.id = ANY(t.subject_ids)) AS subjects,
         (SELECT COUNT(*) FROM slot_selections WHERE teacher_id = t.id AND session_id = t.session_id) AS slots_selected
        FROM teachers t WHERE t.session_id = $1 ORDER BY t.full_name`,
       [sessionId]
@@ -67,6 +86,7 @@ export async function addTeacher(req: AuthRequest, res: Response, next: NextFunc
     const { sessionId } = req.params;
     const data = teacherSchema.parse(req.body);
     await assertCanAddTeacher(sessionId);
+    await assertSubjectsBelongToSchool(data.subjectIds, req.user!.schoolId!);
     const { rows } = await query<{ id: string }>(
       `INSERT INTO teachers (session_id, full_name, email, phone, subject_ids)
        VALUES ($1,$2,$3,$4,$5) RETURNING id`,
@@ -126,15 +146,19 @@ export async function updateTeacher(req: AuthRequest, res: Response, next: NextF
   try {
     const { id, sessionId } = req.params;
     const data = teacherUpdateSchema.parse(req.body);
+    if (data.subjectIds) {
+      await assertSubjectsBelongToSchool(data.subjectIds, req.user!.schoolId!);
+    }
     await query(
       `UPDATE teachers
        SET full_name = COALESCE($1, full_name),
            email = COALESCE($2, email),
            phone = COALESCE($3, phone),
+           subject_ids = COALESCE($4, subject_ids),
            updated_at = NOW()
-       WHERE id=$4 AND session_id=$5
-       AND EXISTS (SELECT 1 FROM sessions s WHERE s.id=$5 AND s.school_id=$6)`,
-      [data.fullName, data.email, data.phone, id, sessionId, req.user!.schoolId]
+       WHERE id=$5 AND session_id=$6
+       AND EXISTS (SELECT 1 FROM sessions s WHERE s.id=$6 AND s.school_id=$7)`,
+      [data.fullName, data.email, data.phone, data.subjectIds, id, sessionId, req.user!.schoolId]
     );
     res.json({ message: 'Enseignant mis à jour' });
   } catch (err) {
@@ -287,6 +311,36 @@ export async function inviteAllTeachers(req: AuthRequest, res: Response, next: N
   }
 }
 
+export async function myScheduleForTeacher(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const userRes = await query<{ email: string }>(`SELECT email FROM users WHERE id=$1`, [req.user!.userId]);
+    const email = userRes.rows[0]?.email;
+    if (!email) { res.status(404).json({ error: 'Utilisateur introuvable' }); return; }
+
+    const { rows } = await query(
+      `SELECT ts.id AS slot_id, ts.day_of_week, ts.start_time::text, ts.end_time::text, ts.room, ts.status,
+              sess.id AS session_id, sess.name AS session_name, sess.academic_year,
+              sch.name AS school_name,
+              sub.name AS subject_name
+       FROM teachers t
+       JOIN slot_selections ss ON ss.teacher_id = t.id
+       JOIN time_slots ts ON ts.id = ss.slot_id
+       JOIN sessions sess ON sess.id = ss.session_id
+       JOIN schools sch ON sch.id = sess.school_id
+       LEFT JOIN subjects sub ON sub.id = ts.subject_id
+       WHERE LOWER(TRIM(t.email)) = LOWER(TRIM($1))
+       ORDER BY CASE ts.day_of_week
+         WHEN 'Lundi' THEN 1 WHEN 'Mardi' THEN 2 WHEN 'Mercredi' THEN 3
+         WHEN 'Jeudi' THEN 4 WHEN 'Vendredi' THEN 5 WHEN 'Samedi' THEN 6 ELSE 7 END,
+         ts.start_time`,
+      [email]
+    );
+    res.json(rows);
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function mySessionsForTeacher(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const userRes = await query<{ email: string }>(`SELECT email FROM users WHERE id=$1`, [req.user!.userId]);
@@ -294,14 +348,23 @@ export async function mySessionsForTeacher(req: AuthRequest, res: Response, next
     if (!email) { res.status(404).json({ error: 'Utilisateur introuvable' }); return; }
 
     const { rows } = await query(
-      `SELECT t.id, t.session_id, t.status, t.invitation_sent_at, t.last_seen_at,
-          (SELECT COUNT(*) FROM slot_selections WHERE teacher_id=t.id) AS slots_selected,
-          s.name AS session_name, s.academic_year, s.status AS session_status, s.deadline,
-          sch.name AS school_name,
-          (SELECT token FROM magic_tokens WHERE teacher_id=t.id AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1) AS magic_token
+      `SELECT t.id AS "id",
+          t.session_id AS "sessionId",
+          t.status,
+          t.invitation_sent_at AS "invitationSentAt",
+          t.last_seen_at AS "lastSeenAt",
+          (SELECT COUNT(*)::int FROM slot_selections WHERE teacher_id=t.id) AS "slotsSelected",
+          s.name AS "sessionName",
+          s.academic_year AS "academicYear",
+          s.status AS "sessionStatus",
+          s.deadline,
+          sch.name AS "schoolName",
+          sc.name AS "schoolClassName",
+          (SELECT token FROM magic_tokens WHERE teacher_id=t.id AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1) AS "magicToken"
        FROM teachers t
        JOIN sessions s ON s.id = t.session_id
        JOIN schools sch ON sch.id = s.school_id
+       LEFT JOIN school_classes sc ON sc.id = s.school_class_id
        WHERE t.email = $1
        ORDER BY t.invitation_sent_at DESC NULLS LAST`,
       [email]
@@ -323,12 +386,18 @@ export async function verifyMagicToken(req: TeacherRequest, res: Response, next:
     const sRes = await query<{ name: string; academic_year: string; status: string }>(
       `SELECT name, academic_year, status FROM sessions WHERE id=$1`, [teacher.sessionId]
     );
+    const tr = tRes.rows[0];
+    const sr = sRes.rows[0];
     res.json({
       valid: true,
       sessionId: teacher.sessionId,
       teacherId: teacher.teacherId,
-      teacher: tRes.rows[0],
-      session: sRes.rows[0],
+      teacher: tr
+        ? { fullName: tr.full_name, email: tr.email }
+        : null,
+      session: sr
+        ? { name: sr.name, academicYear: sr.academic_year, status: sr.status }
+        : null,
     });
   } catch (err) {
     next(err);

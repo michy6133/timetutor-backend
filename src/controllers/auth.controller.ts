@@ -9,18 +9,23 @@ import jwt from 'jsonwebtoken';
 import { createAccessToken, createRefreshToken, revokeRefreshToken, rotateRefreshToken } from '../services/token.service';
 import { sendPasswordReset } from '../services/email.service';
 
+/** Version affichée côté politique / consentement (à synchroniser avec la page politique). */
+export const CURRENT_POLICY_VERSION = '2026-04-26';
+
 const registerSchema = z.object({
   schoolName: z.string().min(2),
   schoolSlug: z.string().min(2).regex(/^[a-z0-9-]+$/),
   fullName: z.string().min(2),
   email: z.string().email(),
   password: z.string().min(8),
+  gdprAccepted: z.boolean().refine((v) => v === true, { message: 'Consentement RGPD requis' }),
 });
 
 const teacherRegisterSchema = z.object({
   fullName: z.string().min(2),
   email: z.string().email(),
   password: z.string().min(8),
+  gdprAccepted: z.boolean().refine((v) => v === true, { message: 'Consentement RGPD requis' }),
 });
 
 const loginSchema = z.object({
@@ -46,9 +51,9 @@ export async function register(req: Request, res: Response, next: NextFunction):
       );
       const schoolId = school.rows[0]?.id;
       const user = await client.query<{ id: string; role: string }>(
-        `INSERT INTO users (school_id, email, password_hash, full_name, role)
-         VALUES ($1, $2, $3, $4, 'director') RETURNING id, role`,
-        [schoolId, data.email, passwordHash, data.fullName]
+        `INSERT INTO users (school_id, email, password_hash, full_name, role, gdpr_consent_at, policy_ack_version)
+         VALUES ($1, $2, $3, $4, 'director', NOW(), $5) RETURNING id, role`,
+        [schoolId, data.email, passwordHash, data.fullName, CURRENT_POLICY_VERSION]
       );
       
       // Create default subscription
@@ -117,9 +122,9 @@ export async function registerTeacher(req: Request, res: Response, next: NextFun
 
     const passwordHash = await bcrypt.hash(data.password, 12);
     const user = await query<{ id: string }>(
-      `INSERT INTO users (school_id, email, password_hash, full_name, role)
-       VALUES (NULL, $1, $2, $3, 'teacher') RETURNING id`,
-      [data.email, passwordHash, data.fullName]
+      `INSERT INTO users (school_id, email, password_hash, full_name, role, gdpr_consent_at, policy_ack_version)
+       VALUES (NULL, $1, $2, $3, 'teacher', NOW(), $4) RETURNING id`,
+      [data.email, passwordHash, data.fullName, CURRENT_POLICY_VERSION]
     );
     const userId = user.rows[0]?.id;
     const accessToken = createAccessToken({ userId, schoolId: null, role: 'teacher' });
@@ -178,6 +183,94 @@ export async function resetPassword(req: Request, res: Response, next: NextFunct
     );
     if (updated.rows.length === 0) throw createError('Utilisateur introuvable', 404);
     res.json({ message: 'Mot de passe mis à jour avec succès.' });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export function policyMetadata(_req: Request, res: Response): void {
+  res.json({
+    version: CURRENT_POLICY_VERSION,
+    policyPath: '/policy',
+  });
+}
+
+export async function exportMyData(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.user) { res.status(401).json({ error: 'Non authentifié' }); return; }
+    const me = await query<{
+      id: string;
+      email: string;
+      full_name: string;
+      role: string;
+      school_id: string | null;
+      gdpr_consent_at: Date | null;
+      policy_ack_version: string | null;
+      created_at: Date;
+    }>(
+      `SELECT id, email, full_name, role, school_id, gdpr_consent_at, policy_ack_version, created_at
+       FROM users WHERE id = $1`,
+      [req.user.userId]
+    );
+    const u = me.rows[0];
+    if (!u) throw createError('Utilisateur introuvable', 404);
+
+    let payload: Record<string, unknown> = {
+      user: u,
+      exportedAt: new Date().toISOString(),
+    };
+
+    if (u.role === 'teacher') {
+      const schedule = await query(
+        `SELECT ts.id AS slot_id, ts.day_of_week, ts.start_time::text, ts.end_time::text, ts.room, ts.status,
+                sess.id AS session_id, sess.name AS session_name, sess.academic_year,
+                sch.name AS school_name, sub.name AS subject_name
+         FROM teachers t
+         JOIN slot_selections ss ON ss.teacher_id = t.id
+         JOIN time_slots ts ON ts.id = ss.slot_id
+         JOIN sessions sess ON sess.id = ss.session_id
+         JOIN schools sch ON sch.id = sess.school_id
+         LEFT JOIN subjects sub ON sub.id = ts.subject_id
+         WHERE LOWER(TRIM(t.email)) = LOWER(TRIM($1))`,
+        [u.email]
+      );
+      const teacherRows = await query(
+        `SELECT t.id, t.session_id, t.status, t.invitation_sent_at, t.last_seen_at
+         FROM teachers t WHERE LOWER(TRIM(t.email)) = LOWER(TRIM($1))`,
+        [u.email]
+      );
+      payload = { ...payload, schedule: schedule.rows, teacherInvitations: teacherRows.rows };
+    }
+
+    if (u.role === 'director' && u.school_id) {
+      const [school, sessions, roster, classes] = await Promise.all([
+        query(`SELECT id, name, slug, is_active, created_at FROM schools WHERE id = $1`, [u.school_id]),
+        query(
+          `SELECT id, name, academic_year, status, deadline, school_class_id, created_at
+           FROM sessions WHERE school_id = $1`,
+          [u.school_id]
+        ),
+        query(
+          `SELECT id, full_name, email, phone, created_at FROM school_roster WHERE school_id = $1`,
+          [u.school_id]
+        ),
+        query(
+          `SELECT id, name, sort_order, is_active, is_system_template FROM school_classes WHERE school_id = $1`,
+          [u.school_id]
+        ),
+      ]);
+      payload = {
+        ...payload,
+        school: school.rows[0] ?? null,
+        sessions: sessions.rows,
+        roster: roster.rows,
+        schoolClasses: classes.rows,
+      };
+    }
+
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="timetutor-donnees-${u.id}.json"`);
+    res.json(payload);
   } catch (err) {
     next(err);
   }

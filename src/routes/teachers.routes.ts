@@ -3,7 +3,7 @@ import multer from 'multer';
 import {
   listTeachers, addTeacher, importTeachers,
   removeTeacher, inviteTeacher, remindTeacher, updateTeacher, inviteAllTeachers,
-  verifyMagicToken, mySessionsForTeacher, searchSchoolTeachers,
+  verifyMagicToken, mySessionsForTeacher, myScheduleForTeacher, searchSchoolTeachers,
 } from '../controllers/teachers.controller';
 import { authenticateJWT, requireRole, authenticateMagicToken } from '../middleware/auth';
 
@@ -15,6 +15,7 @@ router.get('/verify/:token', authenticateMagicToken, verifyMagicToken);
 
 // Teacher portal (JWT auth, role teacher)
 router.get('/my-sessions', authenticateJWT, requireRole('teacher'), mySessionsForTeacher);
+router.get('/my-schedule', authenticateJWT, requireRole('teacher'), myScheduleForTeacher);
 
 // School-wide teacher search (director dashboard)
 router.get('/search', authenticateJWT, requireRole('director'), searchSchoolTeachers);
