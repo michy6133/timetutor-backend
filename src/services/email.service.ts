@@ -119,6 +119,38 @@ export async function sendPasswordReset(email: string, resetLink: string): Promi
   });
 }
 
+export async function sendEmail(to: string, subject: string, html: string): Promise<void> {
+  await send({ from: env.SMTP_FROM, to, subject, html });
+}
+
+export async function sendExchangeRequestToDirector(opts: {
+  directorEmail: string;
+  requesterName: string;
+  holderName: string;
+  slotInfo: string;
+  sessionName: string;
+  dashboardUrl: string;
+}): Promise<void> {
+  await send({
+    from: env.SMTP_FROM,
+    to: opts.directorEmail,
+    subject: `[TimeTutor] Demande d'échange de créneau — ${opts.sessionName}`,
+    html: `
+      <div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:32px">
+        <h1 style="color:#B67332;font-size:22px">Demande d'échange de créneau</h1>
+        <p style="color:#4a3316;line-height:1.7">
+          <strong>${opts.requesterName}</strong> souhaite échanger le créneau <strong>${opts.slotInfo}</strong>
+          actuellement attribué à <strong>${opts.holderName}</strong>.
+        </p>
+        <a href="${opts.dashboardUrl}" style="display:inline-block;background:#B67332;color:white;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:600;margin:24px 0">
+          Gérer la demande depuis le tableau de bord →
+        </a>
+        <p style="color:#9ca3af;font-size:12px">TimeTutor — Planification scolaire intelligente</p>
+      </div>
+    `,
+  });
+}
+
 export async function sendContactRequest(
   requesterName: string,
   targetTeacher: Teacher,
