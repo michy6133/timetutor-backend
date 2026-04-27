@@ -22,18 +22,74 @@ export async function listSchools(_req: AuthRequest, res: Response, next: NextFu
 
 export async function globalStats(_req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
-    const [schools, sessions, teachers, slots] = await Promise.all([
+    const [schools, sessions, teachers, slots, userRoles] = await Promise.all([
       query<{ count: string }>('SELECT COUNT(*) FROM schools WHERE is_active = true'),
       query<{ count: string }>('SELECT COUNT(*) FROM sessions WHERE status = $1', ['open']),
       query<{ count: string }>('SELECT COUNT(*) FROM teachers'),
       query<{ count: string }>('SELECT COUNT(*) FROM time_slots WHERE status = $1', ['validated']),
+      query<{ role: string; count: string }>('SELECT role, COUNT(*)::text AS count FROM users GROUP BY role'),
     ]);
+    const byRole: Record<string, number> = {};
+    for (const r of userRoles.rows) byRole[r.role] = parseInt(r.count, 10);
     res.json({
       activeSchools: parseInt(schools.rows[0]?.count ?? '0'),
       openSessions: parseInt(sessions.rows[0]?.count ?? '0'),
       totalTeachers: parseInt(teachers.rows[0]?.count ?? '0'),
       validatedSlots: parseInt(slots.rows[0]?.count ?? '0'),
+      totalUsers: Object.values(byRole).reduce((a, b) => a + b, 0),
+      directorCount: byRole['director'] ?? 0,
+      teacherCount: byRole['teacher'] ?? 0,
+      adminCount: byRole['super_admin'] ?? 0,
     });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function listUsers(_req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { rows } = await query(
+      `SELECT u.id, u.email, u.full_name, u.role, u.is_active, u.created_at,
+              s.name AS school_name
+       FROM users u
+       LEFT JOIN schools s ON s.id = u.school_id
+       ORDER BY u.role, u.created_at DESC`
+    );
+    res.json(rows);
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function createAdminUser(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { email, fullName, password } = z.object({
+      email: z.string().email(),
+      fullName: z.string().min(2),
+      password: z.string().min(8),
+    }).parse(req.body);
+    const bcrypt = await import('bcryptjs');
+    const hash = await bcrypt.hash(password, 12);
+    const { rows } = await query<{ id: string }>(
+      `INSERT INTO users (email, password_hash, full_name, role, is_active, email_verified)
+       VALUES ($1, $2, $3, 'super_admin', true, true)
+       RETURNING id`,
+      [email, hash, fullName]
+    );
+    res.status(201).json({ id: rows[0].id, email, fullName, role: 'super_admin' });
+  } catch (err: any) {
+    if (err.code === '23505') { res.status(409).json({ error: 'Cet email est déjà utilisé.' }); return; }
+    next(err);
+  }
+}
+
+export async function deleteUser(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { id } = req.params;
+    if (id === req.user!.userId) { res.status(400).json({ error: 'Impossible de supprimer votre propre compte.' }); return; }
+    const { rowCount } = await query(`DELETE FROM users WHERE id = $1`, [id]);
+    if (!rowCount) { res.status(404).json({ error: 'Utilisateur introuvable.' }); return; }
+    res.json({ ok: true });
   } catch (err) {
     next(err);
   }

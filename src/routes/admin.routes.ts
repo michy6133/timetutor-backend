@@ -3,7 +3,7 @@ import {
   listSchools, globalStats, toggleSchool,
   listNotifications, markNotificationRead, markAllNotificationsRead,
   listPlans, getSchoolSubscription, updateSchoolSubscription, getMySubscription, checkoutSubscription,
-  updatePlan, setSchoolLimitsOverride,
+  updatePlan, setSchoolLimitsOverride, listUsers, createAdminUser, deleteUser,
 } from '../controllers/admin.controller';
 import { authenticateJWT, requireRole } from '../middleware/auth';
 
@@ -27,5 +27,8 @@ router.put('/plans/:code', requireRole('super_admin'), updatePlan);
 router.get('/schools/:id/subscription', requireRole('super_admin'), getSchoolSubscription);
 router.put('/schools/:id/subscription', requireRole('super_admin'), updateSchoolSubscription);
 router.put('/schools/:id/limits-override', requireRole('super_admin'), setSchoolLimitsOverride);
+router.get('/users', requireRole('super_admin'), listUsers);
+router.post('/users', requireRole('super_admin'), createAdminUser);
+router.delete('/users/:id', requireRole('super_admin'), deleteUser);
 
 export default router;
