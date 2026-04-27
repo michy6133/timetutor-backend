@@ -42,6 +42,36 @@ export async function assertCanCreateSession(schoolId: string): Promise<void> {
   }
 }
 
+export type FeatureKey =
+  | 'pdfExport'
+  | 'jpgExport'
+  | 'csvImport'
+  | 'slotGenerator'
+  | 'gridDuplicate'
+  | 'slotNegotiations'
+  | 'whatsappNotifications';
+
+export async function assertFeatureEnabled(schoolId: string, feature: FeatureKey): Promise<void> {
+  const result = await query<{
+    status: string;
+    features_json: Record<string, boolean>;
+  }>(
+    `SELECT ss.status, pd.features_json
+     FROM school_subscriptions ss
+     JOIN plan_definitions pd ON pd.code = ss.plan_code
+     WHERE ss.school_id = $1`,
+    [schoolId]
+  );
+  const row = result.rows[0];
+  if (!row) return;
+  if (!['active', 'trial'].includes(row.status)) {
+    throw createError('Abonnement inactif', 403);
+  }
+  if (row.features_json[feature] === false) {
+    throw createError(`Cette fonctionnalité n'est pas disponible dans votre plan d'abonnement`, 403);
+  }
+}
+
 export async function assertCanAddTeacher(sessionId: string): Promise<void> {
   const result = await query<{
     school_id: string;

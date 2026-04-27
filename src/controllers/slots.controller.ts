@@ -16,6 +16,7 @@ import {
 import { sendContactRequest, sendSwapAccepted, sendSwapRejected } from '../services/email.service';
 import type { AuthRequest, TeacherRequest } from '../types';
 import { createError } from '../middleware/errorHandler';
+import { assertFeatureEnabled } from '../services/subscription.service';
 
 const TIGHT_CROSS_SCHOOL_GAP_MINUTES = 60;
 
@@ -286,6 +287,66 @@ export async function createSlot(req: AuthRequest, res: Response, next: NextFunc
   }
 }
 
+export async function generateSlots(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (req.user?.schoolId) await assertFeatureEnabled(req.user.schoolId, 'slotGenerator');
+    const { sessionId } = req.params;
+    const schema = z.object({
+      days: z.array(z.enum(['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi'])).min(1),
+      startTime: z.string().regex(/^\d{2}:\d{2}$/),
+      endTime: z.string().regex(/^\d{2}:\d{2}$/),
+      slotDurationMinutes: z.number().int().min(15).max(480),
+      breakMinutes: z.number().int().min(0).max(120).default(0),
+    });
+    const data = schema.parse(req.body);
+
+    const sessionCheck = await query(
+      `SELECT id FROM sessions WHERE id=$1 AND school_id=$2`,
+      [sessionId, req.user!.schoolId]
+    );
+    if (!sessionCheck.rows[0]) { res.status(404).json({ error: 'Session introuvable' }); return; }
+
+    const [sh, sm] = data.startTime.split(':').map(Number);
+    const [eh, em] = data.endTime.split(':').map(Number);
+    const startMin = sh * 60 + sm;
+    const endMin   = eh * 60 + em;
+    if (startMin >= endMin) { res.status(400).json({ error: 'Heure de début doit précéder la fin' }); return; }
+
+    const pad = (n: number) => String(n).padStart(2, '0');
+    let created = 0;
+
+    for (const day of data.days) {
+      let cursor = startMin;
+      while (cursor + data.slotDurationMinutes <= endMin) {
+        const slotStart = `${pad(Math.floor(cursor / 60))}:${pad(cursor % 60)}`;
+        const slotEndMin = cursor + data.slotDurationMinutes;
+        const slotEnd   = `${pad(Math.floor(slotEndMin / 60))}:${pad(slotEndMin % 60)}`;
+
+        const overlap = await query(
+          `SELECT 1 FROM time_slots
+           WHERE session_id=$1 AND day_of_week=$2
+           AND NOT (end_time <= $3::time OR start_time >= $4::time)
+           LIMIT 1`,
+          [sessionId, day, slotStart, slotEnd]
+        );
+        if (overlap.rows.length === 0) {
+          await query(
+            `INSERT INTO time_slots (session_id, day_of_week, start_time, end_time)
+             VALUES ($1,$2,$3,$4)`,
+            [sessionId, day, slotStart, slotEnd]
+          );
+          created++;
+        }
+        cursor = slotEndMin + data.breakMinutes;
+      }
+    }
+
+    res.json({ created });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function deleteSlot(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const { sessionId, slotId } = req.params;
@@ -507,6 +568,7 @@ export async function duplicateSlotsFromSession(req: AuthRequest, res: Response,
     const { sourceSessionId } = z.object({ sourceSessionId: z.string().uuid() }).parse(req.body);
     const schoolId = req.user!.schoolId;
     if (!schoolId) throw createError('Non autorisé', 403);
+    await assertFeatureEnabled(schoolId, 'gridDuplicate');
 
     const pair = await query<{ t_school: string; s_school: string }>(
       `SELECT t.school_id AS t_school, s.school_id AS s_school

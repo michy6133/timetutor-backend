@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import {
   listSlots, createSlot, createSlotsBatch, duplicateSlotsFromSession,
-  deleteSlot, duplicateSlotToDays,
+  deleteSlot, duplicateSlotToDays, generateSlots,
   selectSlot, deselectSlot,
   validateSlot, unvalidateSlot,
   contactRequest, listMyContactRequests, acceptContactRequest, rejectContactRequest,
@@ -15,6 +15,7 @@ const router = Router({ mergeParams: true });
 router.get('/', authenticateJWT, listSlots);
 router.post('/', authenticateJWT, requireRole('director'), createSlot);
 router.post('/batch', authenticateJWT, requireRole('director'), createSlotsBatch);
+router.post('/generate', authenticateJWT, requireRole('director'), generateSlots);
 router.post('/duplicate-from', authenticateJWT, requireRole('director'), duplicateSlotsFromSession);
 router.delete('/:slotId', authenticateJWT, requireRole('director'), deleteSlot);
 router.post('/:slotId/duplicate', authenticateJWT, requireRole('director'), duplicateSlotToDays);

@@ -215,6 +215,58 @@ export async function getMySubscription(req: AuthRequest, res: Response, next: N
     next(err);
   }
 }
+export async function updatePlan(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { code } = req.params;
+    const payload = z.object({
+      displayName: z.string().min(1).optional(),
+      limitsJson: z.record(z.number().nullable()).optional(),
+      featuresJson: z.record(z.boolean()).optional(),
+      validityDays: z.number().int().min(1).optional(),
+      isActive: z.boolean().optional(),
+    }).parse(req.body);
+
+    const sets: string[] = [];
+    const vals: unknown[] = [];
+    let idx = 1;
+    if (payload.displayName !== undefined) { sets.push(`display_name = $${idx++}`); vals.push(payload.displayName); }
+    if (payload.limitsJson !== undefined) { sets.push(`limits_json = $${idx++}`); vals.push(JSON.stringify(payload.limitsJson)); }
+    if (payload.featuresJson !== undefined) { sets.push(`features_json = $${idx++}`); vals.push(JSON.stringify(payload.featuresJson)); }
+    if (payload.validityDays !== undefined) { sets.push(`validity_days = $${idx++}`); vals.push(payload.validityDays); }
+    if (payload.isActive !== undefined) { sets.push(`is_active = $${idx++}`); vals.push(payload.isActive); }
+    if (sets.length === 0) { res.status(400).json({ error: 'Rien à mettre à jour' }); return; }
+
+    sets.push(`updated_at = NOW()`);
+    vals.push(code);
+    const { rows } = await query(
+      `UPDATE plan_definitions SET ${sets.join(', ')} WHERE code = $${idx} RETURNING *`,
+      vals
+    );
+    if (!rows[0]) { res.status(404).json({ error: 'Plan introuvable' }); return; }
+    res.json(rows[0]);
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function setSchoolLimitsOverride(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { id } = req.params;
+    const payload = z.object({
+      limitsOverride: z.record(z.number().nullable()),
+    }).parse(req.body);
+    const { rows } = await query(
+      `UPDATE school_subscriptions SET limits_override_json = $1, updated_at = NOW()
+       WHERE school_id = $2 RETURNING *`,
+      [JSON.stringify(payload.limitsOverride), id]
+    );
+    if (!rows[0]) { res.status(404).json({ error: 'Abonnement introuvable' }); return; }
+    res.json(rows[0]);
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function checkoutSubscription(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     if (!req.user?.schoolId) { res.status(404).json({ error: 'École introuvable' }); return; }

@@ -4,7 +4,7 @@ import PDFDocument from 'pdfkit';
 import { query, getClient } from '../config/database';
 import type { AuthRequest } from '../types';
 import { createError } from '../middleware/errorHandler';
-import { assertCanCreateSession } from '../services/subscription.service';
+import { assertCanCreateSession, assertFeatureEnabled } from '../services/subscription.service';
 
 const sessionSchema = z.object({
   name: z.string().min(2),
@@ -226,6 +226,7 @@ function buildScheduleMatrix(rows: ScheduleRow[]): {
 
 export async function exportSessionPdf(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
+    if (req.user?.schoolId) await assertFeatureEnabled(req.user.schoolId, 'pdfExport');
     const { id } = req.params;
     const include = z.object({
       includeTeacherName: z.coerce.boolean().default(true),
@@ -647,10 +648,10 @@ function drawSlotCell(
   if (include.includeSubject && cell.subject_name) {
     doc
       .font('Helvetica-Bold')
-      .fontSize(9)
+      .fontSize(11)
       .fillColor(accent)
-      .text(`MATIERE: ${cell.subject_name}`, textX, textY, { width: textWidth, ellipsis: true, lineBreak: false });
-    textY += 11;
+      .text(cell.subject_name, textX, textY, { width: textWidth, ellipsis: true, lineBreak: false });
+    textY += 14;
   }
 
   if (include.includeTeacherName && cell.teacher_name) {

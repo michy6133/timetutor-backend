@@ -7,7 +7,7 @@ import { sendInvitation, sendReminder } from '../services/email.service';
 import { sendWhatsAppNotification } from '../services/notification.service';
 import type { AuthRequest, TeacherRequest } from '../types';
 import { createError } from '../middleware/errorHandler';
-import { assertCanAddTeacher } from '../services/subscription.service';
+import { assertCanAddTeacher, assertFeatureEnabled } from '../services/subscription.service';
 
 const teacherSchema = z.object({
   fullName: z.string().min(2),
@@ -100,6 +100,7 @@ export async function addTeacher(req: AuthRequest, res: Response, next: NextFunc
 
 export async function importTeachers(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
+    if (req.user?.schoolId) await assertFeatureEnabled(req.user.schoolId, 'csvImport');
     const { sessionId } = req.params;
     if (!req.file) throw createError('Fichier CSV requis', 400);
 
@@ -108,16 +109,50 @@ export async function importTeachers(req: AuthRequest, res: Response, next: Next
       columns: true,
       skip_empty_lines: true,
       trim: true,
-    }) as Array<{ full_name?: string; email?: string; phone?: string }>;
+    }) as Array<{ full_name?: string; email?: string; phone?: string; matiere?: string; subject?: string }>;
+
+    // Validate that the matiere column is present
+    if (records.length > 0 && !('matiere' in records[0]) && !('subject' in records[0])) {
+      throw createError('Colonne "matiere" manquante dans le CSV. Format requis : full_name,email,phone,matiere', 400);
+    }
+
+    const schoolRes = await query<{ school_id: string }>(
+      `SELECT school_id FROM sessions WHERE id=$1`,
+      [sessionId]
+    );
+    const schoolId = schoolRes.rows[0]?.school_id;
 
     let imported = 0;
     for (const r of records) {
       if (!r.full_name || !r.email) continue;
+      const matiereName = r.matiere ?? r.subject ?? '';
+      if (!matiereName) continue;
+
+      // Look up subject by name (case-insensitive)
+      let subjectId: string | null = null;
+      if (schoolId && matiereName) {
+        const subRes = await query<{ id: string }>(
+          `SELECT id FROM subjects WHERE school_id=$1 AND LOWER(name)=LOWER($2) LIMIT 1`,
+          [schoolId, matiereName]
+        );
+        if (subRes.rows[0]) {
+          subjectId = subRes.rows[0].id;
+        } else {
+          const newSubRes = await query<{ id: string }>(
+            `INSERT INTO subjects (school_id, name) VALUES ($1,$2)
+             ON CONFLICT (school_id, name) DO UPDATE SET name=EXCLUDED.name
+             RETURNING id`,
+            [schoolId, matiereName]
+          );
+          subjectId = newSubRes.rows[0]?.id ?? null;
+        }
+      }
+
       await assertCanAddTeacher(sessionId);
       await query(
-        `INSERT INTO teachers (session_id, full_name, email, phone)
-         VALUES ($1,$2,$3,$4) ON CONFLICT (session_id, email) DO NOTHING`,
-        [sessionId, r.full_name, r.email, r.phone ?? null]
+        `INSERT INTO teachers (session_id, full_name, email, phone, subject_ids)
+         VALUES ($1,$2,$3,$4,$5) ON CONFLICT (session_id, email) DO NOTHING`,
+        [sessionId, r.full_name, r.email, r.phone ?? null, subjectId ? [subjectId] : []]
       );
       imported++;
     }
