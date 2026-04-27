@@ -169,12 +169,63 @@ export async function sendContactRequest(
           <strong>${requesterName}</strong> souhaite récupérer votre créneau
           <strong>${slotInfo.dayOfWeek} à ${slotInfo.startTime}</strong>.
         </p>
-        ${message ? `<blockquote style="border-left:3px solid #8b5cf6;padding-left:16px;color:#374151">${message}</blockquote>` : ''}
+        ${message ? `<blockquote style="border-left:3px solid #001427;padding-left:16px;color:#374151">${message}</blockquote>` : ''}
         <p style="color:#9ca3af;font-size:12px">
-          Vous pouvez libérer ce créneau depuis votre lien d'invitation,
-          ou l'ignorer pour le conserver. Tant que le créneau n'est pas validé, vous gardez la main.
+          Vous pouvez accepter ou refuser cette demande directement depuis votre lien d'invitation.
+          Tant que le créneau n'est pas validé, vous gardez la main.
         </p>
         <p style="color:#9ca3af;font-size:12px">TimeTutor — Gestion intelligente des emplois du temps</p>
+      </div>
+    `,
+  });
+}
+
+export async function sendSwapAccepted(
+  requesterTeacher: Teacher,
+  slotInfo: { dayOfWeek: string; startTime: string; endTime: string },
+  magicLink: string
+): Promise<void> {
+  await send({
+    from: env.SMTP_FROM,
+    to: requesterTeacher.email,
+    subject: `[TimeTutor] ✓ Échange accepté — ${slotInfo.dayOfWeek} ${slotInfo.startTime}`,
+    html: `
+      <div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:32px">
+        <h1 style="color:#001427;font-size:22px">✓ Demande d'échange acceptée</h1>
+        <p style="color:#374151;line-height:1.7">
+          Bonjour ${requesterTeacher.fullName},<br>
+          Bonne nouvelle ! Le créneau <strong>${slotInfo.dayOfWeek} ${slotInfo.startTime}–${slotInfo.endTime}</strong>
+          vous a été transféré.
+        </p>
+        <a href="${magicLink}" style="display:inline-block;background:#001427;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600;margin-top:8px">
+          Voir mes créneaux →
+        </a>
+        <p style="color:#9ca3af;font-size:12px;margin-top:24px">TimeTutor — Gestion intelligente des emplois du temps</p>
+      </div>
+    `,
+  });
+}
+
+export async function sendSwapRejected(
+  requesterTeacher: Teacher,
+  slotInfo: { dayOfWeek: string; startTime: string; endTime: string }
+): Promise<void> {
+  await send({
+    from: env.SMTP_FROM,
+    to: requesterTeacher.email,
+    subject: `[TimeTutor] Demande d'échange refusée — ${slotInfo.dayOfWeek} ${slotInfo.startTime}`,
+    html: `
+      <div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:32px">
+        <h1 style="color:#BF0603;font-size:22px">Demande d'échange refusée</h1>
+        <p style="color:#374151;line-height:1.7">
+          Bonjour ${requesterTeacher.fullName},<br>
+          Votre demande pour le créneau <strong>${slotInfo.dayOfWeek} ${slotInfo.startTime}–${slotInfo.endTime}</strong>
+          n'a pas été acceptée par le professeur concerné.
+        </p>
+        <p style="color:#6b7280;font-size:14px">
+          Vous pouvez soumettre une nouvelle demande ou choisir un autre créneau libre.
+        </p>
+        <p style="color:#9ca3af;font-size:12px;margin-top:24px">TimeTutor — Gestion intelligente des emplois du temps</p>
       </div>
     `,
   });

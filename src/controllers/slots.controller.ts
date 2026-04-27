@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { query, getClient } from '../config/database';
 import { lockSlot, unlockSlot } from '../services/slotLock.service';
 import { notifyDirector } from '../services/notification.service';
-import { sendContactRequest } from '../services/email.service';
+import { sendContactRequest, sendSwapAccepted, sendSwapRejected } from '../services/email.service';
 import type { AuthRequest, TeacherRequest } from '../types';
 import { createError } from '../middleware/errorHandler';
 
@@ -672,6 +672,30 @@ export async function acceptContactRequest(req: TeacherRequest, res: Response, n
       client.release();
     }
 
+    // Notify requester that their request was accepted
+    const requesterInfoRes = await query<{ full_name: string; email: string; magic_token: string }>(
+      `SELECT t.full_name, t.email, ss_t.token AS magic_token
+       FROM teachers t
+       LEFT JOIN session_slots_tokens ss_t ON ss_t.teacher_id = t.id AND ss_t.session_id = $2
+       WHERE t.id = $1`,
+      [request.requester_teacher_id, sessionId]
+    );
+    const slotInfoRes2 = await query<{ day_of_week: string; start_time: string; end_time: string }>(
+      `SELECT day_of_week, start_time, end_time FROM time_slots WHERE id=$1`, [request.slot_id]
+    );
+    const requesterInfo = requesterInfoRes.rows[0];
+    const slotInfo2 = slotInfoRes2.rows[0];
+    if (requesterInfo && slotInfo2) {
+      const magicLink = requesterInfo.magic_token
+        ? `${process.env['FRONTEND_URL'] ?? 'http://localhost:4200'}/teacher/${requesterInfo.magic_token}`
+        : '';
+      sendSwapAccepted(
+        { fullName: requesterInfo.full_name, email: requesterInfo.email },
+        { dayOfWeek: slotInfo2.day_of_week, startTime: slotInfo2.start_time, endTime: slotInfo2.end_time },
+        magicLink
+      ).catch(() => undefined);
+    }
+
     res.json({ message: 'Demande acceptée et créneau transféré' });
   } catch (err) {
     next(err);
@@ -692,6 +716,33 @@ export async function rejectContactRequest(req: TeacherRequest, res: Response, n
       [requestId, sessionId, teacherId]
     );
     if (result.rowCount === 0) throw createError('Demande introuvable ou déjà traitée', 404);
+
+    // Notify requester that their request was rejected
+    const rejectedReqRes = await query<{
+      requester_teacher_id: string; slot_id: string;
+    }>(
+      `SELECT requester_teacher_id, slot_id FROM contact_requests WHERE id=$1`, [requestId]
+    );
+    const rejReq = rejectedReqRes.rows[0];
+    if (rejReq) {
+      const [reqTeacherRes, rejSlotRes] = await Promise.all([
+        query<{ full_name: string; email: string }>(
+          `SELECT full_name, email FROM teachers WHERE id=$1`, [rejReq.requester_teacher_id]
+        ),
+        query<{ day_of_week: string; start_time: string; end_time: string }>(
+          `SELECT day_of_week, start_time, end_time FROM time_slots WHERE id=$1`, [rejReq.slot_id]
+        ),
+      ]);
+      const rt = reqTeacherRes.rows[0];
+      const rs = rejSlotRes.rows[0];
+      if (rt && rs) {
+        sendSwapRejected(
+          { fullName: rt.full_name, email: rt.email },
+          { dayOfWeek: rs.day_of_week, startTime: rs.start_time, endTime: rs.end_time }
+        ).catch(() => undefined);
+      }
+    }
+
     res.json({ message: 'Demande refusée' });
   } catch (err) {
     next(err);
