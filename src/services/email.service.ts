@@ -3,12 +3,17 @@ import { env } from '../config/env';
 
 const smtpConfigured = Boolean(env.SMTP_USER && env.SMTP_PASS);
 
+const smtpPort = parseInt(env.SMTP_PORT, 10) || 587;
+
 const transporter = smtpConfigured
   ? nodemailer.createTransport({
       host: env.SMTP_HOST,
-      port: parseInt(env.SMTP_PORT),
-      secure: env.SMTP_PORT === '465',
+      port: smtpPort,
+      secure: smtpPort === 465,
       auth: { user: env.SMTP_USER, pass: env.SMTP_PASS },
+      /** Port 587 = STARTTLS (Gmail, Brevo, etc.) */
+      requireTLS: smtpPort === 587,
+      tls: { minVersion: 'TLSv1.2' as const },
     })
   : null;
 
@@ -18,7 +23,15 @@ async function send(mail: nodemailer.SendMailOptions): Promise<void> {
     console.log('[email] Subject:', mail.subject);
     return;
   }
-  await transporter.sendMail(mail);
+  try {
+    const info = await transporter.sendMail(mail);
+    if (env.NODE_ENV === 'development') {
+      console.log('[email] sent ok →', mail.to, 'messageId:', info.messageId);
+    }
+  } catch (err) {
+    console.error('[email] sendMail failed →', mail.to, err);
+    throw err;
+  }
 }
 
 interface Teacher { fullName: string; email: string; }

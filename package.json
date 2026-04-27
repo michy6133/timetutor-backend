@@ -35,6 +35,9 @@
     "ulid": "^2.3.0",
     "zod": "^3.22.4"
   },
+  "overrides": {
+    "axios": "^1.7.9"
+  },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
     "@types/cookie-parser": "^1.4.8",

@@ -3,7 +3,7 @@ import multer from 'multer';
 import {
   listTeachers, addTeacher, importTeachers,
   removeTeacher, inviteTeacher, remindTeacher, updateTeacher, inviteAllTeachers,
-  verifyMagicToken, mySessionsForTeacher, myScheduleForTeacher, searchSchoolTeachers,
+  verifyMagicToken, mySessionsForTeacher, myScheduleForTeacher, myScheduleForToken, searchSchoolTeachers,
 } from '../controllers/teachers.controller';
 import { authenticateJWT, requireRole, authenticateMagicToken } from '../middleware/auth';
 
@@ -12,6 +12,7 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 *
 
 // Teacher verification (public)
 router.get('/verify/:token', authenticateMagicToken, verifyMagicToken);
+router.get('/my-schedule/:token', authenticateMagicToken, myScheduleForToken);
 
 // Teacher portal (JWT auth, role teacher)
 router.get('/my-sessions', authenticateJWT, requireRole('teacher'), mySessionsForTeacher);

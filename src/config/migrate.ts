@@ -11,6 +11,7 @@ const MIGRATIONS = [
   '004_roster_payments_exchanges.sql',
   '005_school_classes_gdpr.sql',
   '006_preset_subjects.sql',
+  '007_slot_negotiations.sql',
 ];
 
 async function migrate() {

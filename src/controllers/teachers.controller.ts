@@ -264,6 +264,16 @@ export async function remindTeacher(req: AuthRequest, res: Response, next: NextF
 export async function inviteAllTeachers(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const { sessionId } = req.params;
+    const totalRes = await query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count
+       FROM teachers t
+       JOIN sessions s ON s.id = t.session_id
+       WHERE t.session_id = $1
+         AND s.school_id = $2`,
+      [sessionId, req.user!.schoolId]
+    );
+    const totalTeachers = parseInt(totalRes.rows[0]?.count ?? '0', 10);
+
     const teachersRes = await query<{ id: string; full_name: string; email: string; phone: string | null }>(
       `SELECT t.id
             , t.full_name
@@ -300,12 +310,19 @@ export async function inviteAllTeachers(req: AuthRequest, res: Response, next: N
           await sendWhatsAppNotification(teacher.phone, `TimeTutor: invitation envoyee pour la session ${session.name}.`);
         }
         invited++;
-      } catch {
+      } catch (err) {
+        console.error('[invite-all] échec pour', teacher.email, teacher.id, err);
         failed++;
       }
     }
 
-    res.json({ invited, failed, total: teachersRes.rows.length });
+    res.json({
+      invited,
+      failed,
+      eligible: teachersRes.rows.length,
+      totalTeachers,
+      alreadyInvited: Math.max(0, totalTeachers - teachersRes.rows.length),
+    });
   } catch (err) {
     next(err);
   }
@@ -317,6 +334,43 @@ export async function myScheduleForTeacher(req: AuthRequest, res: Response, next
     const email = userRes.rows[0]?.email;
     if (!email) { res.status(404).json({ error: 'Utilisateur introuvable' }); return; }
 
+    const { rows } = await query(
+      `SELECT ts.id AS slot_id, ts.day_of_week, ts.start_time::text, ts.end_time::text, ts.room, ts.status,
+              sess.id AS session_id, sess.name AS session_name, sess.academic_year,
+              sch.name AS school_name,
+              sub.name AS subject_name
+       FROM teachers t
+       JOIN slot_selections ss ON ss.teacher_id = t.id
+       JOIN time_slots ts ON ts.id = ss.slot_id
+       JOIN sessions sess ON sess.id = ss.session_id
+       JOIN schools sch ON sch.id = sess.school_id
+       LEFT JOIN subjects sub ON sub.id = ts.subject_id
+       WHERE LOWER(TRIM(t.email)) = LOWER(TRIM($1))
+       ORDER BY CASE ts.day_of_week
+         WHEN 'Lundi' THEN 1 WHEN 'Mardi' THEN 2 WHEN 'Mercredi' THEN 3
+         WHEN 'Jeudi' THEN 4 WHEN 'Vendredi' THEN 5 WHEN 'Samedi' THEN 6 ELSE 7 END,
+         ts.start_time`,
+      [email]
+    );
+    res.json(rows);
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function myScheduleForToken(req: TeacherRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const teacherId = req.teacher?.teacherId;
+    if (!teacherId) {
+      res.status(401).json({ error: 'Token invalide' });
+      return;
+    }
+    const teacherRes = await query<{ email: string }>(`SELECT email FROM teachers WHERE id=$1`, [teacherId]);
+    const email = teacherRes.rows[0]?.email;
+    if (!email) {
+      res.status(404).json({ error: 'Enseignant introuvable' });
+      return;
+    }
     const { rows } = await query(
       `SELECT ts.id AS slot_id, ts.day_of_week, ts.start_time::text, ts.end_time::text, ts.room, ts.status,
               sess.id AS session_id, sess.name AS session_name, sess.academic_year,

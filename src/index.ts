@@ -8,14 +8,23 @@ import { env } from './config/env';
 import { pool } from './config/database';
 import { connectRedis } from './config/redis';
 import { setupSocketHandlers } from './socket/handler';
+import { setSocketIo } from './config/socket-io';
 
 const PORT = parseInt(env.PORT);
 const server = http.createServer(app);
 
 const io = new SocketServer(server, {
-  cors: { origin: env.FRONTEND_URL, methods: ['GET', 'POST'] },
+  cors:
+    env.NODE_ENV === 'development'
+      ? { origin: true, methods: ['GET', 'POST'], credentials: true }
+      : {
+          origin: env.FRONTEND_URL.split(',').map((s) => s.trim()).filter(Boolean),
+          methods: ['GET', 'POST'],
+          credentials: true,
+        },
 });
 
+setSocketIo(io);
 setupSocketHandlers(io);
 
 async function applyMigrations(): Promise<void> {

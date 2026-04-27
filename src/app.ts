@@ -14,16 +14,22 @@ import { openApiSpec } from './docs/openapi';
 
 const app = express();
 
+/** Pas d’ETag / 304 sur l’API : le navigateur ne doit pas réutiliser un JSON périmé (créneaux, verify, etc.). */
+app.set('etag', false);
+
 app.use(helmet());
 app.use(cors({
   origin: (origin, cb) => {
     if (!origin) return cb(null, true);
-    const allowed = [env.FRONTEND_URL];
-    // Allow any localhost port in development
-    if (env.NODE_ENV === 'development' && /^https?:\/\/localhost(:\d+)?$/.test(origin)) {
+    const allowed = env.FRONTEND_URL.split(',').map((s) => s.trim()).filter(Boolean);
+    if (allowed.includes(origin)) return cb(null, true);
+    if (
+      env.NODE_ENV === 'development' &&
+      /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
+    ) {
       return cb(null, true);
     }
-    cb(allowed.includes(origin) ? null : new Error('CORS'), allowed.includes(origin));
+    return cb(null, false);
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
@@ -57,6 +63,12 @@ app.get('/redoc', redoc({
   specUrl: '/openapi.json',
 }));
 
+app.use('/api/v1', (_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  next();
+});
 app.use('/api/v1', apiRoutes);
 
 // 404 handler

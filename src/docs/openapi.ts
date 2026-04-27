@@ -200,6 +200,28 @@ export const openApiSpec = {
         responses: { ...ok, '401': { description: 'Token invalide' } },
       },
     },
+    '/sessions/{sessionId}/slots/negotiations/{token}': {
+      get: {
+        tags: ['Slots'],
+        summary: 'Lister les négociations de créneaux (enseignant, lien magique)',
+        responses: { ...ok, '401': { description: 'Token invalide' } },
+      },
+    },
+    '/sessions/{sessionId}/slots/negotiations/{negotiationId}/choose/{token}': {
+      post: {
+        tags: ['Slots'],
+        summary: 'Choisir un créneau dans une négociation (enseignant, lien magique)',
+        responses: { ...ok, '401': { description: 'Token invalide' } },
+      },
+    },
+    '/sessions/{sessionId}/slots/negotiations': {
+      get: {
+        tags: ['Slots'],
+        summary: 'Vue globale des négociations de la session (directeur)',
+        security: [bearer],
+        responses: { ...ok, ...unauthorized, ...forbidden },
+      },
+    },
     '/sessions/{sessionId}/teachers': {
       get: {
         tags: ['Teachers'],

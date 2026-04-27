@@ -4,7 +4,7 @@ dotenv.config();
 
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
-  PORT: z.string().default('3001'),
+  PORT: z.string().default('3000'),
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
   REDIS_URL: z.string().default('redis://localhost:6379'),
   JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 chars'),
@@ -12,11 +12,12 @@ const envSchema = z.object({
   JWT_REFRESH_SECRET: z.string().min(32, 'JWT_REFRESH_SECRET must be at least 32 chars'),
   JWT_REFRESH_EXPIRES_IN: z.string().default('30d'),
   COOKIE_SECURE: z.string().default('false'),
-  SMTP_HOST: z.string().default('smtp.gmail.com'),
-  SMTP_PORT: z.string().default('587'),
-  SMTP_USER: z.string().default(''),
-  SMTP_PASS: z.string().default(''),
-  SMTP_FROM: z.string().default('TimeTutor <noreply@timetutor.app>'),
+  SMTP_HOST: z.string().default('smtp.gmail.com').transform((s) => s.trim()),
+  SMTP_PORT: z.string().default('587').transform((s) => s.trim()),
+  /** Espaces / retours ligne en fin de ligne dans .env cassent souvent l’auth SMTP */
+  SMTP_USER: z.string().default('').transform((s) => s.trim()),
+  SMTP_PASS: z.string().default('').transform((s) => s.trim()),
+  SMTP_FROM: z.string().default('TimeTutor <noreply@timetutor.app>').transform((s) => s.trim()),
   FRONTEND_URL: z.string().default('http://localhost:4200'),
   MAGIC_LINK_BASE_URL: z.string().default('http://localhost:4200/teacher'),
   MAGIC_TOKEN_TTL_HOURS: z.string().default('72'),
