@@ -1,186 +1,313 @@
 # TimeTutor — Backend
 
-> API REST + WebSocket — Node.js / Express / PostgreSQL / Redis
+> API REST + WebSocket — Node.js 20 / Express 4 / PostgreSQL 16 / Redis 7
 
 ## Stack technique
 
-- **Node.js 20 + Express** — API REST + WebSocket server
-- **PostgreSQL 16** — Base principale (sessions, slots, users, schools)
-- **Redis 7** — Verrous optimistes créneaux temps réel
-- **Socket.io** — Synchronisation multi-users en temps réel
-- **JWT + ULID tokens** — Auth directeur + liens magiques enseignants
-- **Resend / Nodemailer** — Emails transactionnels
+| Composant | Technologie |
+|-----------|-------------|
+| Runtime | Node.js 20 |
+| Framework | Express 4 |
+| Base de données | PostgreSQL 16 (driver `pg`) |
+| Cache / Verrous | Redis 7 |
+| Temps réel | Socket.io 4 |
+| Auth | JWT (access 7j + refresh 30j rotatif) + Magic Token ULID (72h) |
+| Paiements | FedaPay SDK (MTN MoMo, Moov Money, carte) |
+| Validation | Zod |
+| Email | Nodemailer (SMTP Gmail / Resend) |
+| PDF | PDFKit |
+| SMS / WhatsApp | Twilio (optionnel) |
+| Sécurité | Helmet + express-rate-limit |
+| Typage | TypeScript strict |
+
+---
 
 ## Prérequis
 
 - Node.js >= 20
 - npm >= 9
-- Docker + Docker Compose (pour PostgreSQL et Redis en local)
+- Docker + Docker Compose (PostgreSQL + Redis en local)
 
-## Installation
+---
+
+## Installation locale
 
 ```bash
-git clone https://github.com/TON_USERNAME/timetutor-backend.git
 cd timetutor-backend
-npm install
-cp .env.example .env     # puis remplir les variables
 
-# Démarrer PostgreSQL + Redis via Docker
+cp .env.example .env
+# Éditer .env : DATABASE_URL, JWT_SECRET, JWT_REFRESH_SECRET, SMTP_*, FEDAPAY_*
+
+# Démarrer PostgreSQL + Redis
 npm run db:up
 
-# Lancer le serveur en mode dev
+npm install
+
+# Appliquer toutes les migrations SQL
+npm run migrate
+
 npm run dev
+# → http://localhost:3001
 ```
 
-L'API tourne sur `http://localhost:3000`
-Health check : `GET http://localhost:3000/health`
+Health check : `GET http://localhost:3001/api/v1/health`
+
+---
+
+## Variables d'environnement requises
+
+| Variable | Description | Exemple |
+|---|---|---|
+| `PORT` | Port HTTP | `3001` |
+| `DATABASE_URL` | Connexion PostgreSQL | `postgresql://...` |
+| `REDIS_URL` | Connexion Redis | `redis://localhost:6379` |
+| `JWT_SECRET` | Clé access token (≥ 32 chars) | — |
+| `JWT_REFRESH_SECRET` | Clé refresh token (≥ 32 chars) | — |
+| `JWT_EXPIRES_IN` | Durée access token | `7d` |
+| `JWT_REFRESH_EXPIRES_IN` | Durée refresh token | `30d` |
+| `SMTP_HOST` | Serveur SMTP | `smtp.gmail.com` |
+| `SMTP_PORT` | Port SMTP | `587` |
+| `SMTP_USER` | Email expéditeur | `ton@email.com` |
+| `SMTP_PASS` | App Password | — |
+| `SMTP_FROM` | Nom + email affiché | `TimeTutor <noreply@...>` |
+| `FRONTEND_URL` | URL frontend (CORS + emails) | `http://localhost:4200` |
+| `MAGIC_LINK_BASE_URL` | Base des liens magiques | `http://localhost:4200/teacher` |
+| `FEDAPAY_SECRET_KEY` | Clé secrète FedaPay | `sk_sandbox_...` |
+| `FEDAPAY_PUBLIC_KEY` | Clé publique FedaPay | `pk_sandbox_...` |
+| `FEDAPAY_ENV` | Mode FedaPay | `sandbox` / `live` |
+
+Voir `.env.example` pour la liste complète.
+
+---
+
+## Migrations SQL
+
+Les migrations sont dans `migrations/` et appliquées **dans l'ordre** par `npm run migrate` :
+
+| Fichier | Contenu |
+|---|---|
+| `001_initial.sql` | Tables core : users, schools, sessions, time_slots, teachers, subjects |
+| `002_teacher_role.sql` | Rôle enseignant + teacher_subjects |
+| `003_auth_subscriptions.sql` | Refresh tokens, school_subscriptions, plan_definitions |
+| `004_roster_payments_exchanges.sql` | contact_requests, payment_transactions, teacher_roster |
+| `005_school_classes_gdpr.sql` | school_classes, RGPD (data_export_requests) |
+| `006_preset_subjects.sql` | Matières prédéfinies (seed) |
+| `007_slot_negotiations.sql` | slot_negotiations, slot_negotiation_participants |
+| `008_admin_seed_plan_features.sql` | Seed plans (standard/pro/premium) + super admin test |
+
+> `npm run migrate` est idempotent : il n'applique que les migrations pas encore enregistrées dans `schema_migrations`.
+
+---
 
 ## Structure du projet
 
 ```
 src/
-├── config/          # Configuration DB, Redis, env
-├── controllers/     # Logique métier des routes
-├── middleware/      # Auth, validation, error handler
-├── models/          # Modèles de données (requêtes SQL)
-├── routes/          # Déclaration des endpoints
-├── services/        # Services métier (email, slot-lock, etc.)
-├── utils/           # Helpers (ulid, jwt, etc.)
-├── types/           # Types TypeScript partagés
-├── db/
-│   └── migrations/  # Scripts SQL de migration
-├── app.ts           # Config Express
-└── index.ts         # Entrée + Socket.io
-tests/
-├── unit/
-└── integration/
+├── config/
+│   ├── env.ts            # Validation variables d'env (Zod)
+│   ├── database.ts       # Pool PostgreSQL
+│   ├── redis.ts          # Client Redis
+│   └── migrate.ts        # Runner migrations SQL
+├── middleware/
+│   ├── auth.ts           # authenticateJWT + requireRole + authenticateMagicToken
+│   ├── errorHandler.ts
+│   └── rateLimiter.ts
+├── routes/
+│   ├── auth.routes.ts
+│   ├── sessions.routes.ts
+│   ├── slots.routes.ts
+│   ├── teachers.routes.ts
+│   └── admin.routes.ts
+├── controllers/
+│   ├── auth.controller.ts
+│   ├── sessions.controller.ts   # Export PDF/JPG
+│   ├── slots.controller.ts      # Générateur, duplication, contact, négociations
+│   ├── teachers.controller.ts   # Import CSV, invitations, magic tokens
+│   └── admin.controller.ts      # Stats, écoles, plans, users
+├── services/
+│   ├── email.service.ts
+│   ├── slotLock.service.ts      # Verrous Redis (30s TTL)
+│   ├── subscription.service.ts  # Feature gating (assertFeatureEnabled)
+│   ├── token.service.ts         # JWT access + refresh
+│   └── notification.service.ts
+├── socket/
+│   └── handler.ts
+├── types/index.ts
+├── app.ts                       # Express app
+└── index.ts                     # Entrée : HTTP + Socket.io
+migrations/
+├── 001_initial.sql … 008_admin_seed_plan_features.sql
+docker-compose.yml
+.env.example
 ```
 
-## Endpoints prévus (MVP)
+---
+
+## Endpoints API (v1)
+
+Base URL : `/api/v1`
+
+### Auth
 
 ```
-POST   /api/auth/login              → Auth directeur (JWT)
-POST   /api/auth/register           → Inscription école
-
-GET    /api/sessions                → Liste sessions d'une école
-POST   /api/sessions                → Créer une session
-GET    /api/sessions/:id            → Détail session
-PATCH  /api/sessions/:id            → Modifier session
-
-POST   /api/sessions/:id/slots      → Créer des créneaux
-GET    /api/sessions/:id/slots      → Lister créneaux + état
-PATCH  /api/slots/:id               → Modifier un créneau
-DELETE /api/slots/:id               → Supprimer un créneau
-
-POST   /api/sessions/:id/teachers   → Importer enseignants (CSV / JSON)
-POST   /api/teachers/:id/invite     → Envoyer lien magique
-
-GET    /api/t/:token                → Page enseignant (via magic link)
-POST   /api/t/:token/select         → Sélectionner un créneau
-DELETE /api/t/:token/select/:slotId → Désélectionner
-
-POST   /api/slots/:id/validate      → Valider un créneau (directeur)
-GET    /api/sessions/:id/export     → Export PDF/Excel emploi du temps
+POST  /auth/register              Créer compte directeur + école
+POST  /auth/register-teacher      Créer compte enseignant
+POST  /auth/login                 Connexion (retourne access + refresh tokens)
+POST  /auth/refresh               Rafraîchir access token
+POST  /auth/logout                Révoquer refresh token
+GET   /auth/me                    Profil connecté
+PUT   /auth/me                    Modifier profil
+POST  /auth/forgot-password       Demander reset par email
+POST  /auth/reset-password        Valider reset
+GET   /auth/me/export             Export RGPD (JSON)
 ```
 
-## Workflow Git — Règles fondamentales
-
-### ⚠️ On ne commit JAMAIS directement sur `main`
-
-`main` = branche stable, fonctionnelle, déployable en production.
-
-### Cycle de travail
-
-```bash
-# 1. Se mettre à jour
-git checkout main
-git pull origin main
-
-# 2. Créer sa branche de travail
-git checkout -b feature/nom-de-la-feature
-
-# 3. Développer + commits réguliers
-git add .
-git commit -m "feat: description claire"
-
-# 4. Envoyer sa branche
-git push origin feature/nom-de-la-feature
-
-# 5. Ouvrir une Pull Request sur GitHub → vers main
-```
-
-### Nommage des branches
-
-| Type | Exemple |
-|------|---------|
-| Nouvelle fonctionnalité | `feature/auth-jwt` |
-| Correction de bug | `fix/slot-lock-redis` |
-| Refactoring | `refactor/email-service` |
-| Migration DB | `db/add-schools-table` |
-| Tests | `test/slot-selection-integration` |
-
-### Convention de commits
+### Sessions
 
 ```
-feat: génération liens magiques ULID avec expiry
-fix: correction verrou Redis créneau concurrent
-refactor: découpage service email en modules
-db: migration ajout table slots
-test: tests intégration sélection créneaux
-chore: mise à jour dépendances
+GET    /sessions                  Liste sessions de l'école
+POST   /sessions                  Créer une session
+GET    /sessions/:id              Détail + stats
+PUT    /sessions/:id              Modifier (nom, deadline, classe…)
+PUT    /sessions/:id/status       Changer statut (draft/open/closed/published)
+DELETE /sessions/:id              Supprimer
+GET    /sessions/:id/export/pdf   Export PDF emploi du temps
+GET    /sessions/:id/export/jpg   Export JPG (image haute résolution)
 ```
 
-### Mise à jour de sa branche avec main
-
-```bash
-git checkout feature/ma-feature
-git fetch origin
-git rebase origin/main
-# Résoudre les conflits si besoin → git add . → git rebase --continue
-```
-
-## CI/CD — Pipeline
-
-Le pipeline GitHub Actions (`.github/workflows/ci.yml`) se déclenche à chaque push et PR.
-
-**Ce qu'il vérifie :**
-- ✅ Lint TypeScript (`npm run lint`)
-- ✅ Build (`npm run build`)
-- ✅ Services Docker (PostgreSQL + Redis) disponibles
-- 🔜 Tests d'intégration (à activer au fil du développement)
-- 🔜 Déploiement automatique sur staging (Railway/Render — S4)
-
-**Règle :** Une PR ne peut être mergée que si le pipeline est ✅ vert.
-
-## Fonctionnalités à développer (branches à créer)
+### Créneaux
 
 ```
-feature/auth-directeur-jwt
-feature/school-registration
-feature/sessions-crud
-feature/slots-crud
-feature/teacher-import-csv
-feature/magic-link-generation
-feature/email-invitations
-feature/slot-selection-api
-feature/redis-slot-lock
-feature/websocket-realtime
-feature/director-dashboard-api
-feature/conflict-engine
-feature/validation-api
-feature/export-pdf-excel
-feature/automated-reminders
-feature/super-admin-api
+GET    /sessions/:sid/slots                    Liste créneaux
+POST   /sessions/:sid/slots                    Créer créneau
+POST   /sessions/:sid/slots/batch              Créer en lot
+POST   /sessions/:sid/slots/generate           Générateur automatique (jours/heures/durée/pause)
+POST   /sessions/:sid/slots/duplicate-from     Dupliquer depuis une autre session
+DELETE /sessions/:sid/slots/:id                Supprimer
+POST   /sessions/:sid/slots/:id/validate       Valider (directeur)
+POST   /sessions/:sid/slots/:id/unvalidate     Invalider
+
+# Enseignant (magic token)
+GET    /teachers/verify/:token
+GET    /sessions/:sid/slots/teacher/:token
+POST   /sessions/:sid/slots/:id/select/:token
+DELETE /sessions/:sid/slots/:id/select/:token
+POST   /sessions/:sid/slots/:id/contact/:token          Demande d'échange
+GET    /sessions/:sid/slots/contact-requests/:token     Historique demandes
+POST   /sessions/:sid/slots/contact-requests/:id/accept/:token
+POST   /sessions/:sid/slots/contact-requests/:id/reject/:token
+
+# Négociations (résolution conflits)
+GET    /sessions/:sid/slots/negotiations/:token
+POST   /sessions/:sid/slots/negotiations/:nid/choose/:token
+GET    /sessions/:sid/slots/negotiations               (directeur)
 ```
+
+### Enseignants
+
+```
+GET    /sessions/:sid/teachers              Liste enseignants de la session
+POST   /sessions/:sid/teachers              Ajouter un enseignant
+POST   /sessions/:sid/teachers/import       Import CSV
+DELETE /sessions/:sid/teachers/:id          Supprimer
+PUT    /sessions/:sid/teachers/:id          Modifier
+POST   /sessions/:sid/teachers/:id/invite   Envoyer lien magique
+POST   /sessions/:sid/teachers/:id/remind   Relancer
+GET    /teachers/my-sessions                Sessions de l'enseignant connecté
+GET    /teachers/my-schedule/:token         Calendrier global multi-écoles
+```
+
+### Admin / Abonnement
+
+```
+GET   /admin/me/subscription       Abonnement école courante (directeur)
+POST  /admin/me/checkout           Initier/confirmer paiement FedaPay
+GET   /admin/stats                 Stats globales (super_admin)
+GET   /admin/schools               Liste écoles (super_admin)
+PUT   /admin/schools/:id/toggle    Activer/désactiver école
+PUT   /admin/schools/:id/subscription  Changer plan
+GET   /admin/plans                 Liste plans
+PUT   /admin/plans/:code           Modifier plan (features, limites)
+GET   /admin/users                 Liste utilisateurs (super_admin)
+POST  /admin/users                 Créer super_admin
+DELETE /admin/users/:id            Supprimer utilisateur
+GET   /admin/notifications         Notifications directeur
+```
+
+### Autres
+
+```
+GET   /school-classes              Liste classes de l'école
+POST  /school-classes              Créer classe
+PUT   /school-classes/:id          Modifier
+DELETE /school-classes/:id         Supprimer
+GET   /subjects                    Liste matières
+POST  /subjects                    Créer matière
+PUT   /subjects/:id                Modifier
+DELETE /subjects/:id               Supprimer
+```
+
+### WebSocket Events
+
+```
+Client → Serveur : join-session { sessionId }
+
+Serveur → Client :
+  slot-selected         { slotId, teacherName, status }
+  slot-released         { slotId }
+  slot-validated        { slotId }
+  slot-locked           { slotId }
+  contact-request       { slotId, requesterName }
+  negotiation-updated   { sessionId, negotiationId }
+  contact-requests-changed
+```
+
+---
+
+## Logique gestion des conflits de créneaux
+
+### 1. Demandes de contact (échange direct)
+Déclencheur : Prof A envoie une demande sur le créneau de Prof B.
+- Crée `contact_requests` (status `pending`)
+- Envoie un email à B avec le message de A
+- B peut **Accepter** (swap atomique : le créneau passe à A, B est libéré) ou **Refuser**
+
+### 2. Négociations (résolution multi-participants)
+Créée automatiquement en même temps que la demande de contact.
+- Tous les profs en conflit sur ce créneau voient les créneaux libres alternatifs
+- Chacun choisit un créneau libre → il quitte le créneau disputé
+- Quand tous ont résolu → statut `locked`, créneau disputé verrouillé
+- Le **directeur valide** le créneau depuis la grille → statut final `validated`
+
+**Les deux mécanismes sont complémentaires :**
+- Accepter la demande = résolution rapide 1-1
+- Choisir un créneau libre = résolution algorithmique quand l'acceptation directe n'est pas possible
+
+---
+
+## Feature gating
+
+Chaque fonctionnalité premium est contrôlée par `assertFeatureEnabled(schoolId, featureKey)` avant d'être exécutée. Les features sont stockées en `JSONB` dans `plan_definitions.features_json` :
+
+| Clé | Description | Standard | Pro | Premium |
+|-----|-------------|---------|-----|---------|
+| `pdfExport` | Export PDF | ✓ | ✓ | ✓ |
+| `jpgExport` | Export JPG | ✗ | ✓ | ✓ |
+| `csvImport` | Import CSV enseignants | ✓ | ✓ | ✓ |
+| `slotGenerator` | Générateur de grille | ✓ | ✓ | ✓ |
+| `gridDuplicate` | Duplication de grille | ✓ | ✓ | ✓ |
+| `slotNegotiations` | Négociations / échanges | ✗ | ✓ | ✓ |
+| `whatsappNotifications` | Partage WhatsApp | ✗ | ✓ | ✓ |
+
+---
 
 ## Scripts disponibles
 
 ```bash
-npm run dev      # Dev local avec hot-reload
+npm run dev      # Dev local avec hot-reload (ts-node / tsx)
 npm run build    # Compile TypeScript → dist/
-npm start        # Démarrer la version compilée
-npm run lint     # ESLint check
-npm test         # Tests Jest
+npm start        # Démarrer la version compilée (dist/index.js)
+npm run migrate  # Appliquer les migrations SQL en attente
 npm run db:up    # Démarrer PostgreSQL + Redis (Docker)
 npm run db:down  # Arrêter les conteneurs
 ```
